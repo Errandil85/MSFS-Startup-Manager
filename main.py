@@ -149,6 +149,11 @@ class MainWindow(QMainWindow):
             row = item.row()
             enabled = item.checkState() == Qt.Checked
             self.manager.set_enabled(row, enabled)
+            try:
+                self.manager.save()
+            except Exception as e:
+                QMessageBox.critical(self, "Error", str(e))
+
     def modify_entry(self):
         rows = self.table.selectionModel().selectedRows()
         if not rows:
