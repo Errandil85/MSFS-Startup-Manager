@@ -1,0 +1,68 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background gradient -->
+  <defs>
+    <linearGradient id="bgGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#0078d4;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#005a9e;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="planeGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#ffffff;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#e1e1e1;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="codeGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#00d4aa;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#00a887;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  
+  <!-- Main background circle with modern gradient -->
+  <circle cx="128" cy="128" r="120" fill="url(#bgGradient)" stroke="#ffffff" stroke-width="4"/>
+  
+  <!-- Airplane silhouette -->
+  <g transform="translate(128, 110) scale(1.2)">
+    <!-- Fuselage -->
+    <ellipse cx="0" cy="0" rx="45" ry="8" fill="url(#planeGradient)"/>
+    
+    <!-- Wings -->
+    <ellipse cx="0" cy="0" rx="15" ry="35" fill="url(#planeGradient)"/>
+    
+    <!-- Tail -->
+    <path d="M 30 -3 L 45 -8 L 45 8 L 30 3 Z" fill="url(#planeGradient)"/>
+    
+    <!-- Nose -->
+    <ellipse cx="-35" cy="0" rx="12" ry="6" fill="url(#planeGradient)"/>
+    
+    <!-- Engine highlights -->
+    <ellipse cx="-15" cy="-25" rx="4" ry="8" fill="#f0f0f0"/>
+    <ellipse cx="-15" cy="25" rx="4" ry="8" fill="#f0f0f0"/>
+  </g>
+  
+  <!-- Code/XML symbol in bottom right -->
+  <g transform="translate(180, 180)">
+    <circle cx="0" cy="0" r="25" fill="url(#codeGradient)" stroke="#ffffff" stroke-width="2"/>
+    <!-- XML brackets -->
+    <text x="0" y="8" font-family="Consolas, monospace" font-size="24" font-weight="bold" fill="white" text-anchor="middle">&lt;/&gt;</text>
+  </g>
+  
+  <!-- Settings gear in top right -->
+  <g transform="translate(190, 66)">
+    <circle cx="0" cy="0" r="18" fill="#2d2d2d" stroke="#ffffff" stroke-width="2"/>
+    <!-- Gear teeth -->
+    <path d="M 0 -18 L 4 -22 L -4 -22 Z" fill="#2d2d2d"/>
+    <path d="M 18 0 L 22 4 L 22 -4 Z" fill="#2d2d2d"/>
+    <path d="M 0 18 L 4 22 L -4 22 Z" fill="#2d2d2d"/>
+    <path d="M -18 0 L -22 4 L -22 -4 Z" fill="#2d2d2d"/>
+    <path d="M 12.7 -12.7 L 18 -18 L 14 -14 Z" fill="#2d2d2d"/>
+    <path d="M 12.7 12.7 L 18 18 L 14 14 Z" fill="#2d2d2d"/>
+    <path d="M -12.7 12.7 L -18 18 L -14 14 Z" fill="#2d2d2d"/>
+    <path d="M -12.7 -12.7 L -18 -18 L -14 -14 Z" fill="#2d2d2d"/>
+    <!-- Center hole -->
+    <circle cx="0" cy="0" r="6" fill="#ffffff"/>
+  </g>
+  
+  <!-- Subtle highlight on main circle -->
+  <circle cx="128" cy="128" r="120" fill="none" stroke="url(#bgGradient)" stroke-width="2" opacity="0.3"/>
+  
+  <!-- Inner highlight for depth -->
+  <circle cx="105" cy="105" r="15" fill="#ffffff" opacity="0.15"/>
+</svg>
