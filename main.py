@@ -11,6 +11,7 @@ from PySide6.QtGui import QFont, QIcon, QPalette, QColor
 from exexml import ExeXmlManager
 from views.add_edit_dialog import AddEditDialog
 import settings
+from PySide6.QtGui import QIcon
 
 
 class ModernButton(QPushButton):
@@ -47,6 +48,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("MSFS exe.xml Manager")
         self.setMinimumSize(1000, 700)
+        self.setWindowIcon(QIcon("icon.ico"))
         
         # Apply modern stylesheet
         self.setStyleSheet(self.get_modern_stylesheet())
@@ -468,6 +470,13 @@ class MainWindow(QMainWindow):
             self.update_status(f"Saved preset: {name.strip()}")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to save preset: {str(e)}")
+
+    
+    def resource_path(relative_path):
+        """ Get absolute path to resource, works for dev and PyInstaller """
+        if hasattr(sys, "_MEIPASS"):
+            return os.path.join(sys._MEIPASS, relative_path)
+        return os.path.join(os.path.abspath("."), relative_path)
 
     def get_modern_stylesheet(self):
         return """
