@@ -166,12 +166,11 @@ class ExeXmlManager:
         self.parse_entries()
 
     def remove_entry(self, index):
-        if index < 0 or index >= len(self.entries):
-            return
-        parent = self.entries[index].elem.getparent()
-        if parent is not None:
-            parent.remove(self.entries[index].elem)
-        self.parse_entries()
+        entry = self.entries[index]
+        # Instead of entry.elem.getparent(), use self.root (or the parent element you have)
+        self.root.remove(entry.elem)
+        del self.entries[index]
+        self.save()
 
     def execute_entry(self, index):
         if index < 0 or index >= len(self.entries):
