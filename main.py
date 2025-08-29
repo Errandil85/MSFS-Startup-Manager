@@ -4,10 +4,10 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, QWidget, 
     QTableWidget, QTableWidgetItem, QPushButton, QComboBox, QLabel,
     QFileDialog, QMessageBox, QAbstractItemView, QInputDialog, QFrame,
-    QHeaderView, QSpacerItem, QSizePolicy
+    QHeaderView, QSpacerItem, QSizePolicy, QMenu, QMenuBar
 )
 from PySide6.QtCore import Qt, QSize
-from PySide6.QtGui import QFont, QIcon, QPalette, QColor
+from PySide6.QtGui import QFont, QIcon, QPalette, QColor, QAction
 from exexml import ExeXmlManager
 from views.add_edit_dialog import AddEditDialog
 import settings
@@ -41,6 +41,38 @@ class ModernLabel(QLabel):
             self.setObjectName("subtitle")
         else:
             self.setObjectName("title")
+
+
+class DetectedPathDialog(QMessageBox):
+    def __init__(self, detected_paths, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Auto-detected exe.xml Files")
+        self.setIcon(QMessageBox.Question)
+        
+        if len(detected_paths) == 1:
+            description, path = detected_paths[0]
+            installation_type = settings.get_installation_type(path)
+            self.setText(f"Found exe.xml file:\n\n{description} ({installation_type})\n{path}\n\nWould you like to load this file?")
+            self.setStandardButtons(QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel)
+            self.setDefaultButton(QMessageBox.Yes)
+        else:
+            text = f"Found {len(detected_paths)} exe.xml files:\n\n"
+            for i, (description, path) in enumerate(detected_paths, 1):
+                installation_type = settings.get_installation_type(path)
+                text += f"{i}. {description} ({installation_type})\n   {path}\n\n"
+            
+            text += "Which one would you like to load?"
+            self.setText(text)
+            
+            # Add custom buttons for each detected path
+            for i, (description, path) in enumerate(detected_paths):
+                installation_type = settings.get_installation_type(path)
+                button_text = f"{description} ({installation_type})"
+                button = self.addButton(button_text, QMessageBox.AcceptRole)
+                button.setProperty("path", path)
+            
+            self.addButton("Browse...", QMessageBox.RejectRole)
+            self.addButton("Cancel", QMessageBox.RejectRole)
 
 
 class MainWindow(QMainWindow):
@@ -86,10 +118,8 @@ class MainWindow(QMainWindow):
         # Initialize
         self.refresh_presets()
         
-        # Auto load if settings has path
-        paths = s.get("paths", {})
-        if self.current_version in paths and os.path.exists(paths[self.current_version]):
-            self.load_exe(paths[self.current_version])
+        # Auto load with detection
+        self.auto_load_exe()
 
     def create_header(self):
         layout = QVBoxLayout()
@@ -106,6 +136,12 @@ class MainWindow(QMainWindow):
         subtitle_layout.addWidget(subtitle)
         
         subtitle_layout.addStretch()
+        
+        # Auto-detect button
+        auto_detect_btn = ModernButton("Auto-detect", "🔍")
+        auto_detect_btn.clicked.connect(self.auto_detect_exe)
+        auto_detect_btn.setToolTip("Automatically detect exe.xml files for the current simulator version")
+        subtitle_layout.addWidget(auto_detect_btn)
         
         # Version selector
         version_label = QLabel("Simulator:")
@@ -244,8 +280,13 @@ class MainWindow(QMainWindow):
         self.entries_count_label = QLabel("0 entries")
         self.entries_count_label.setObjectName("statusLabel")
         
+        # Installation type label
+        self.install_type_label = QLabel("")
+        self.install_type_label.setObjectName("statusLabel")
+        
         layout.addWidget(self.status_label)
         layout.addStretch()
+        layout.addWidget(self.install_type_label)
         layout.addWidget(self.entries_count_label)
         
         return layout
@@ -254,6 +295,84 @@ class MainWindow(QMainWindow):
         self.status_label.setText(message)
         count = len(self.manager.entries)
         self.entries_count_label.setText(f"{count} {'entry' if count == 1 else 'entries'}")
+        
+        # Update installation type if file is loaded
+        if self.manager.filepath:
+            install_type = settings.get_installation_type(self.manager.filepath)
+            self.install_type_label.setText(f"• {install_type}")
+        else:
+            self.install_type_label.setText("")
+
+    # -------------------------
+    # Auto-detection methods
+    # -------------------------
+    def auto_load_exe(self):
+        """Try to auto-load exe.xml on startup"""
+        s = settings.load_settings()
+        paths = s.get("paths", {})
+        
+        # First, try saved path
+        if self.current_version in paths and os.path.exists(paths[self.current_version]):
+            self.load_exe(paths[self.current_version])
+            return
+        
+        # If no saved path, try auto-detection
+        auto_path = settings.auto_detect_exe_xml(self.current_version)
+        if auto_path:
+            try:
+                self.load_exe(auto_path)
+                self.update_status(f"Auto-loaded {os.path.basename(auto_path)}")
+            except Exception as e:
+                self.update_status(f"Auto-detection found file but failed to load: {str(e)}")
+
+    def auto_detect_exe(self):
+        """Manual auto-detection triggered by button"""
+        detected_paths = settings.get_all_detected_paths(self.current_version)
+        
+        if not detected_paths:
+            QMessageBox.information(
+                self, 
+                "Auto-detection", 
+                f"No exe.xml files were automatically detected for {self.current_version}.\n\n"
+                "Please use 'Load exe.xml' to browse manually.\n\n"
+                "Expected locations:\n"
+                "• Steam: %APPDATA%\\Microsoft Flight Simulator\\exe.xml\n"
+                "• MS Store: %LOCALAPPDATA%\\Packages\\Microsoft.FlightSimulator_8wekyb3d8bbwe\\LocalState\\exe.xml"
+            )
+            return
+        
+        if len(detected_paths) == 1:
+            # Single path found, ask to load it
+            description, path = detected_paths[0]
+            installation_type = settings.get_installation_type(path)
+            reply = QMessageBox.question(
+                self,
+                "Auto-detection",
+                f"Found exe.xml file:\n\n{description} ({installation_type})\n{path}\n\nWould you like to load this file?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            
+            if reply == QMessageBox.Yes:
+                try:
+                    self.load_exe(path)
+                except Exception as e:
+                    QMessageBox.critical(self, "Error", f"Failed to load exe.xml: {str(e)}")
+        else:
+            # Multiple paths found, show selection dialog
+            dialog = DetectedPathDialog(detected_paths, self)
+            result = dialog.exec()
+            
+            if result == QMessageBox.Accepted:
+                # Find which button was clicked
+                clicked_button = dialog.clickedButton()
+                if clicked_button and hasattr(clicked_button, 'property') and clicked_button.property("path"):
+                    path = clicked_button.property("path")
+                    try:
+                        self.load_exe(path)
+                    except Exception as e:
+                        QMessageBox.critical(self, "Error", f"Failed to load exe.xml: {str(e)}")
+                elif clicked_button and clicked_button.text() == "Browse...":
+                    self.load_exe()  # Trigger manual browse
 
     # -------------------------
     # Sim Version Handling
@@ -265,31 +384,58 @@ class MainWindow(QMainWindow):
         settings.save_settings(s)
         self.refresh_presets()
         self.update_status(f"Switched to {version}")
-        # Auto-load path if available
-        paths = s.get("paths", {})
-        if version in paths and os.path.exists(paths[version]):
-            self.load_exe(paths[version])
+        
+        # Clear current data
+        self.manager = ExeXmlManager()
+        self.populate_table()
+        
+        # Try auto-load for new version
+        self.auto_load_exe()
 
     # -------------------------
     # exe.xml Handling
     # -------------------------
     def load_exe(self, path=None):
         if not path:
+            # Get last used directory for file dialog
+            s = settings.load_settings()
+            paths = s.get("paths", {})
+            start_dir = ""
+            
+            if self.current_version in paths and os.path.exists(os.path.dirname(paths[self.current_version])):
+                start_dir = os.path.dirname(paths[self.current_version])
+            else:
+                # Use default MSFS directory based on version
+                if self.current_version == "MSFS2020":
+                    start_dir = os.path.expandvars(r"%APPDATA%\Microsoft Flight Simulator")
+                elif self.current_version == "MSFS2024":
+                    start_dir = os.path.expandvars(r"%APPDATA%\Microsoft Flight Simulator 2024")
+                
+                # Fallback to user's home directory if default doesn't exist
+                if not os.path.exists(start_dir):
+                    start_dir = os.path.expanduser("~")
+            
             path, _ = QFileDialog.getOpenFileName(
-                self, "Select exe.xml", "", "XML Files (*.xml)"
+                self, "Select exe.xml", start_dir, "XML Files (*.xml)"
             )
             if not path:
                 return
+        
         try:
             self.manager.load(path)
             self.populate_table()
+            
             # Save path in settings
             s = settings.load_settings()
             paths = s.get("paths", {})
             paths[self.current_version] = path
             s["paths"] = paths
             settings.save_settings(s)
-            self.update_status(f"Loaded {os.path.basename(path)}")
+            
+            # Determine installation type and update status
+            install_type = settings.get_installation_type(path)
+            self.update_status(f"Loaded {os.path.basename(path)} ({install_type})")
+            
         except Exception as e:
             QMessageBox.critical(self, "Error", str(e))
             self.update_status("Error loading file")
