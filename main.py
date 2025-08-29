@@ -4,7 +4,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, QWidget, 
     QTableWidget, QTableWidgetItem, QPushButton, QComboBox, QLabel,
     QFileDialog, QMessageBox, QAbstractItemView, QInputDialog, QFrame,
-    QHeaderView, QSpacerItem, QSizePolicy, QMenu, QMenuBar
+    QHeaderView, QSpacerItem, QSizePolicy, QMenu, QMenuBar, QCheckBox
 )
 from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QFont, QIcon, QPalette, QColor, QAction
@@ -14,33 +14,78 @@ import settings
 from PySide6.QtGui import QIcon
 
 
-class ModernButton(QPushButton):
-    def __init__(self, text, icon_text="", primary=False):
-        super().__init__()
-        self.setText(f"{icon_text} {text}".strip())
-        self.setMinimumHeight(36)
-        self.setMinimumWidth(100)
+class BackupDialog(QMessageBox):
+    def __init__(self, exe_xml_path, sim_version, parent=None):
+        super().__init__(parent)
+        self.exe_xml_path = exe_xml_path
+        self.sim_version = sim_version
         
-        if primary:
-            self.setObjectName("primaryButton")
+        self.setWindowTitle("First Time Setup - Backup Required")
+        self.setIcon(QMessageBox.Information)
+        
+        install_type = settings.get_installation_type(exe_xml_path)
+        
+        self.setText(
+            f"🛡️ <b>Safety First!</b><br><br>"
+            f"This is the first time you're using this exe.xml file:<br>"
+            f"<b>{install_type}</b><br>"
+            f"<code>{exe_xml_path}</code><br><br>"
+            f"<b>A backup will be created automatically</b> before making any changes.<br>"
+            f"This ensures you can always restore your original configuration."
+        )
+        
+        self.setDetailedText(
+            f"Backup Details:\n"
+            f"• Location: {settings.get_backup_dir(sim_version)}\n"
+            f"• Format: exe_xml_backup_{install_type.replace(' ', '_')}_{'{timestamp}'}.xml\n"
+            f"• You can view/restore backups from the File menu\n\n"
+            f"The backup will be created when you first save changes or add entries."
+        )
+        
+        # Add custom buttons
+        self.addButton("Create Backup & Continue", QMessageBox.AcceptRole)
+        self.addButton("View Existing Backups", QMessageBox.ActionRole)
+        self.addButton("Cancel", QMessageBox.RejectRole)
+        
+        self.setDefaultButton(self.buttons()[0])
+
+
+class BackupManagerDialog(QMessageBox):
+    def __init__(self, sim_version, parent=None):
+        super().__init__(parent)
+        self.sim_version = sim_version
+        self.setWindowTitle(f"Backup Manager - {sim_version}")
+        self.setIcon(QMessageBox.Information)
+        
+        backups = settings.get_existing_backups(sim_version)
+        
+        if not backups:
+            self.setText("No backups found for this simulator version.")
+            self.setStandardButtons(QMessageBox.Ok)
         else:
-            self.setObjectName("secondaryButton")
-
-
-class ModernComboBox(QComboBox):
-    def __init__(self):
-        super().__init__()
-        self.setMinimumHeight(36)
-        self.setMinimumWidth(120)
-
-
-class ModernLabel(QLabel):
-    def __init__(self, text, subtitle=False):
-        super().__init__(text)
-        if subtitle:
-            self.setObjectName("subtitle")
-        else:
-            self.setObjectName("title")
+            text = f"<b>Found {len(backups)} backup(s) for {sim_version}:</b><br><br>"
+            
+            from datetime import datetime
+            for i, (filename, full_path, creation_time) in enumerate(backups[:10], 1):  # Show max 10
+                dt = datetime.fromtimestamp(creation_time)
+                # Extract install type from filename
+                parts = filename.replace("exe_xml_backup_", "").replace(".xml", "").split("_")
+                install_type = " ".join(parts[:-2]) if len(parts) > 2 else "Unknown"
+                
+                text += f"{i}. <b>{install_type}</b><br>"
+                text += f"   Created: {dt.strftime('%Y-%m-%d %H:%M:%S')}<br>"
+                text += f"   File: {filename}<br><br>"
+            
+            if len(backups) > 10:
+                text += f"... and {len(backups) - 10} more backups"
+            
+            self.setText(text)
+            
+            # Add buttons for backup actions
+            self.addButton("Open Backup Folder", QMessageBox.ActionRole)
+            self.addButton("Close", QMessageBox.RejectRole)
+            
+            self.backup_folder = settings.get_backup_dir(sim_version)
 
 
 class DetectedPathDialog(QMessageBox):
@@ -75,6 +120,35 @@ class DetectedPathDialog(QMessageBox):
             self.addButton("Cancel", QMessageBox.RejectRole)
 
 
+class ModernButton(QPushButton):
+    def __init__(self, text, icon_text="", primary=False):
+        super().__init__()
+        self.setText(f"{icon_text} {text}".strip())
+        self.setMinimumHeight(36)
+        self.setMinimumWidth(100)
+        
+        if primary:
+            self.setObjectName("primaryButton")
+        else:
+            self.setObjectName("secondaryButton")
+
+
+class ModernComboBox(QComboBox):
+    def __init__(self):
+        super().__init__()
+        self.setMinimumHeight(36)
+        self.setMinimumWidth(120)
+
+
+class ModernLabel(QLabel):
+    def __init__(self, text, subtitle=False):
+        super().__init__(text)
+        if subtitle:
+            self.setObjectName("subtitle")
+        else:
+            self.setObjectName("title")
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -89,6 +163,9 @@ class MainWindow(QMainWindow):
         self.manager = ExeXmlManager()
         s = settings.load_settings()
         self.current_version = s.get("version", "MSFS2020")
+        
+        # Create menu bar
+        self.create_menu_bar()
 
         # Create main widget and layout
         main_widget = QWidget()
@@ -120,6 +197,42 @@ class MainWindow(QMainWindow):
         
         # Auto load with detection
         self.auto_load_exe()
+
+    def create_menu_bar(self):
+        menubar = self.menuBar()
+        
+        # File menu
+        file_menu = menubar.addMenu('File')
+        
+        # Backup submenu
+        backup_menu = file_menu.addMenu('Backups')
+        
+        view_backups_action = QAction('View Backups...', self)
+        view_backups_action.triggered.connect(self.show_backup_manager)
+        backup_menu.addAction(view_backups_action)
+        
+        open_backup_folder_action = QAction('Open Backup Folder', self)
+        open_backup_folder_action.triggered.connect(self.open_backup_folder)
+        backup_menu.addAction(open_backup_folder_action)
+        
+        backup_menu.addSeparator()
+        
+        create_manual_backup_action = QAction('Create Manual Backup', self)
+        create_manual_backup_action.triggered.connect(self.create_manual_backup)
+        backup_menu.addAction(create_manual_backup_action)
+        
+        file_menu.addSeparator()
+        
+        # Settings
+        settings_action = QAction('Settings...', self)
+        file_menu.addAction(settings_action)
+        
+        # Help menu
+        help_menu = menubar.addMenu('Help')
+        
+        about_action = QAction('About...', self)
+        about_action.triggered.connect(self.show_about)
+        help_menu.addAction(about_action)
 
     def create_header(self):
         layout = QVBoxLayout()
@@ -375,6 +488,126 @@ class MainWindow(QMainWindow):
                     self.load_exe()  # Trigger manual browse
 
     # -------------------------
+    # Backup Management
+    # -------------------------
+    def check_and_create_backup(self, exe_xml_path):
+        """Check if backup is needed and create it"""
+        backup_created, backup_path, error = settings.auto_backup_if_needed(exe_xml_path, self.current_version)
+        
+        if backup_created:
+            QMessageBox.information(
+                self,
+                "Backup Created",
+                f"✅ <b>Backup created successfully!</b><br><br>"
+                f"Your original exe.xml has been backed up to:<br>"
+                f"<code>{backup_path}</code><br><br>"
+                f"You can now safely make changes to your configuration."
+            )
+            return True
+        elif error and "already backed up" not in error:
+            reply = QMessageBox.warning(
+                self,
+                "Backup Failed",
+                f"⚠️ <b>Warning: Backup creation failed</b><br><br>"
+                f"Error: {error}<br><br>"
+                f"Do you want to continue without a backup?<br>"
+                f"<b>This is not recommended.</b>",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            return reply == QMessageBox.Yes
+        
+        return True  # No backup needed (already exists) or user chose to continue
+
+    def show_first_time_backup_dialog(self, exe_xml_path):
+        """Show the first-time backup dialog"""
+        dialog = BackupDialog(exe_xml_path, self.current_version, self)
+        result = dialog.exec()
+        
+        clicked_button = dialog.clickedButton()
+        button_text = clicked_button.text() if clicked_button else ""
+        
+        if "Create Backup" in button_text:
+            return self.check_and_create_backup(exe_xml_path)
+        elif "View Existing" in button_text:
+            self.show_backup_manager()
+            return False  # Don't continue loading
+        else:
+            return False  # Cancel
+
+    def show_backup_manager(self):
+        """Show the backup manager dialog"""
+        dialog = BackupManagerDialog(self.current_version, self)
+        result = dialog.exec()
+        
+        if hasattr(dialog, 'backup_folder'):
+            clicked_button = dialog.clickedButton()
+            if clicked_button and "Open Backup Folder" in clicked_button.text():
+                self.open_backup_folder()
+
+    def open_backup_folder(self):
+        """Open the backup folder in file explorer"""
+        backup_dir = settings.get_backup_dir(self.current_version)
+        
+        try:
+            import subprocess
+            import platform
+            
+            if platform.system() == "Windows":
+                subprocess.run(["explorer", backup_dir])
+            elif platform.system() == "Darwin":  # macOS
+                subprocess.run(["open", backup_dir])
+            else:  # Linux
+                subprocess.run(["xdg-open", backup_dir])
+                
+        except Exception as e:
+            QMessageBox.information(
+                self,
+                "Backup Folder",
+                f"Backup folder location:\n{backup_dir}\n\n"
+                f"(Could not open automatically: {str(e)})"
+            )
+
+    def create_manual_backup(self):
+        """Create a manual backup of the current exe.xml file"""
+        if not self.manager.filepath:
+            QMessageBox.information(self, "No File Loaded", "Please load an exe.xml file first.")
+            return
+        
+        backup_path = settings.create_backup(self.manager.filepath, self.current_version)
+        
+        if backup_path:
+            QMessageBox.information(
+                self,
+                "Manual Backup Created",
+                f"✅ Manual backup created successfully!\n\n"
+                f"Backup saved to:\n{backup_path}"
+            )
+        else:
+            QMessageBox.critical(
+                self,
+                "Backup Failed",
+                "Failed to create manual backup. Please check file permissions."
+            )
+
+    def show_about(self):
+        """Show about dialog"""
+        QMessageBox.about(
+            self,
+            "About MSFS exe.xml Manager",
+            f"<h3>MSFS exe.xml Manager v2.0</h3>"
+            f"<p>A modern tool for managing Microsoft Flight Simulator addons.</p>"
+            f"<p><b>Features:</b></p>"
+            f"<ul>"
+            f"<li>Auto-detection for Steam and MS Store versions</li>"
+            f"<li>Automatic backups for safety</li>"
+            f"<li>Preset management</li>"
+            f"<li>Support for MSFS2020 and MSFS2024</li>"
+            f"</ul>"
+            f"<p>Your original exe.xml files are automatically backed up before any changes.</p>"
+        )
+
+    # -------------------------
     # Sim Version Handling
     # -------------------------
     def change_version(self, version):
@@ -422,6 +655,11 @@ class MainWindow(QMainWindow):
                 return
         
         try:
+            # Check if backup is needed for first-time use
+            if settings.is_first_time_using_file(path, self.current_version):
+                if not self.show_first_time_backup_dialog(path):
+                    return  # User cancelled or backup failed
+            
             self.manager.load(path)
             self.populate_table()
             
@@ -441,7 +679,17 @@ class MainWindow(QMainWindow):
             self.update_status("Error loading file")
 
     def save_exe(self):
+        if not self.manager.filepath:
+            QMessageBox.information(self, "No File Loaded", "Please load an exe.xml file first.")
+            return
+            
         try:
+            # Create backup before saving if this is the first save
+            if settings.is_first_time_using_file(self.manager.filepath, self.current_version):
+                backup_created, backup_path, error = settings.auto_backup_if_needed(self.manager.filepath, self.current_version)
+                if backup_created:
+                    self.update_status(f"Backup created: {os.path.basename(backup_path)}")
+            
             self.manager.save()
             QMessageBox.information(self, "Success", "exe.xml saved successfully.")
             self.update_status("File saved successfully")
@@ -487,6 +735,13 @@ class MainWindow(QMainWindow):
         if item.column() == 0:  # Enabled checkbox changed
             row = item.row()
             enabled = item.checkState() == Qt.Checked
+            
+            # Create backup before first modification if needed
+            if settings.is_first_time_using_file(self.manager.filepath, self.current_version):
+                backup_created, backup_path, error = settings.auto_backup_if_needed(self.manager.filepath, self.current_version)
+                if backup_created:
+                    self.update_status(f"Backup created: {os.path.basename(backup_path)}")
+            
             self.manager.set_enabled(row, enabled)
             try:
                 self.manager.save()
@@ -498,14 +753,28 @@ class MainWindow(QMainWindow):
     # Entry Handling
     # -------------------------
     def add_entry(self):
+        if not self.manager.filepath:
+            QMessageBox.information(self, "No File Loaded", "Please load an exe.xml file first.")
+            return
+            
         dlg = AddEditDialog(self)
         if dlg.exec():
+            # Create backup before first modification if needed
+            if settings.is_first_time_using_file(self.manager.filepath, self.current_version):
+                backup_created, backup_path, error = settings.auto_backup_if_needed(self.manager.filepath, self.current_version)
+                if backup_created:
+                    self.update_status(f"Backup created: {os.path.basename(backup_path)}")
+            
             name, path, args, enabled = dlg.get_data()
             self.manager.add_entry(name, path, args, enabled)
             self.populate_table()
             self.update_status("Entry added")
 
     def remove_entry(self):
+        if not self.manager.filepath:
+            QMessageBox.information(self, "No File Loaded", "Please load an exe.xml file first.")
+            return
+            
         rows = self.table.selectionModel().selectedRows()
         if not rows:
             QMessageBox.information(self, "No Selection", "Please select an entry to remove.")
@@ -521,6 +790,12 @@ class MainWindow(QMainWindow):
         )
         
         if reply == QMessageBox.Yes:
+            # Create backup before first modification if needed
+            if settings.is_first_time_using_file(self.manager.filepath, self.current_version):
+                backup_created, backup_path, error = settings.auto_backup_if_needed(self.manager.filepath, self.current_version)
+                if backup_created:
+                    self.update_status(f"Backup created: {os.path.basename(backup_path)}")
+            
             self.manager.remove_entry(index)
             self.populate_table()
             self.update_status("Entry removed")
@@ -540,6 +815,10 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Error", str(e))
 
     def modify_entry(self):
+        if not self.manager.filepath:
+            QMessageBox.information(self, "No File Loaded", "Please load an exe.xml file first.")
+            return
+            
         rows = self.table.selectionModel().selectedRows()
         if not rows:
             QMessageBox.information(self, "No Selection", "Please select an entry to modify.")
@@ -555,6 +834,12 @@ class MainWindow(QMainWindow):
         dlg.enabled_check.setChecked(entry.enabled)
 
         if dlg.exec():
+            # Create backup before first modification if needed
+            if settings.is_first_time_using_file(self.manager.filepath, self.current_version):
+                backup_created, backup_path, error = settings.auto_backup_if_needed(self.manager.filepath, self.current_version)
+                if backup_created:
+                    self.update_status(f"Backup created: {os.path.basename(backup_path)}")
+            
             name, path, args, enabled = dlg.get_data()
             self.manager.modify_entry(index, name, path, args, enabled)
             self.populate_table()
