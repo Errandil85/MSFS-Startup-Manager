@@ -291,7 +291,7 @@ class MainWindow(QMainWindow):
         load_btn = ModernButton("Load exe.xml", "📁", primary=True)
         load_btn.clicked.connect(self.load_exe)
         
-        save_btn = ModernButton("Save", "💾")
+        save_btn = ModernButton("Apply", "✅")
         save_btn.clicked.connect(self.save_exe)
         
         file_layout.addWidget(file_label)
