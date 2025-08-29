@@ -1102,7 +1102,7 @@ if __name__ == "__main__":
     
     # Set application properties
     app.setApplicationName("MSFS exe.xml Manager")
-    app.setApplicationVersion("2.0")
+    app.setApplicationVersion("1.0.0-rc1")
     app.setOrganizationName("Flight Sim Tools")
     
     window = MainWindow()
