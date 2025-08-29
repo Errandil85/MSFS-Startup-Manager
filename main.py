@@ -412,7 +412,8 @@ class MainWindow(QMainWindow):
         # Update installation type if file is loaded
         if self.manager.filepath:
             install_type = settings.get_installation_type(self.manager.filepath)
-            self.install_type_label.setText(f"• {install_type}")
+            # Show both the install type and the actual path for debugging
+            self.install_type_label.setText(f"• {install_type} | Path: {self.manager.filepath}")
         else:
             self.install_type_label.setText("")
 
@@ -595,7 +596,7 @@ class MainWindow(QMainWindow):
         QMessageBox.about(
             self,
             "About MSFS exe.xml Manager",
-            f"<h3>MSFS exe.xml Manager v1.0.0rc1</h3>"
+            f"<h3>MSFS exe.xml Manager v2.0</h3>"
             f"<p>A modern tool for managing Microsoft Flight Simulator addons.</p>"
             f"<p><b>Features:</b></p>"
             f"<ul>"
