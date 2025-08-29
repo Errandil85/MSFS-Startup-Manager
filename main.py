@@ -596,7 +596,7 @@ class MainWindow(QMainWindow):
         QMessageBox.about(
             self,
             "About MSFS exe.xml Manager",
-            f"<h3>MSFS exe.xml Manager v2.0</h3>"
+            f"<h3>MSFS exe.xml Manager v1.0.0-rc1</h3>"
             f"<p>A modern tool for managing Microsoft Flight Simulator addons.</p>"
             f"<p><b>Features:</b></p>"
             f"<ul>"
