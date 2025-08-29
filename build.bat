@@ -20,6 +20,7 @@ pyinstaller ^
  --add-data "%ICON_FILE%;." ^
  main.py
 
+copy "%ICON_FILE%" dist\
 echo.
 echo Build finished. EXE located in the "dist" folder.
 pause
