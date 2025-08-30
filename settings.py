@@ -16,11 +16,30 @@ def get_preset_dir(sim_version: str):
 
 
 def load_settings():
-    """Load settings.json as dict."""
+    """Load settings.json as dict with defaults."""
+    default_settings = {
+        "version": "MSFS2020",
+        "monitor_enabled": False,
+        "paths": {},
+        "backed_up_files": {}
+    }
+    
     if os.path.exists(SETTINGS_FILE):
-        with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
+        try:
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                settings = json.load(f)
+                
+                # Merge with defaults to ensure all keys exist
+                for key, value in default_settings.items():
+                    if key not in settings:
+                        settings[key] = value
+                        
+                return settings
+        except (json.JSONDecodeError, Exception) as e:
+            print(f"Error loading settings: {e}, using defaults")
+            return default_settings
+    
+    return default_settings
 
 
 def save_settings(data: dict):
