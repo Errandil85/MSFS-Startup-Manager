@@ -1,7 +1,6 @@
 import sys
 import os
 import subprocess
-import time
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, QWidget, 
     QTableWidget, QTableWidgetItem, QPushButton, QComboBox, QLabel,
@@ -15,8 +14,8 @@ from views.add_edit_dialog import AddEditDialog
 import settings
 from PySide6.QtGui import QIcon
 
-# Import the per-entry process manager
-from per_entry_process_manager import PerEntryProcessManager, ProcessState
+# Import the process monitor
+from process_monitor import MSFSProcessMonitor, MonitorState
 
 
 class BackupDialog(QMessageBox):
@@ -169,9 +168,9 @@ class MainWindow(QMainWindow):
         s = settings.load_settings()
         self.current_version = s.get("version", "MSFS2020")
         
-        # Add per-entry process manager
-        self.process_manager = PerEntryProcessManager()
-        self.setup_process_manager_callbacks()
+        # Add process monitor
+        self.process_monitor = MSFSProcessMonitor()
+        self.setup_monitor_callbacks()
         
         # Monitor enabled state (load from settings)
         self.monitor_enabled = self.load_monitor_setting()
@@ -209,38 +208,45 @@ class MainWindow(QMainWindow):
         
         # Auto load with detection
         self.auto_load_exe()
-
-    def setup_process_manager_callbacks(self):
-        """Setup callbacks for process manager events"""
-        self.process_manager.add_callback('process_started', self.on_process_started)
-        self.process_manager.add_callback('process_stopped', self.on_process_stopped)
-        self.process_manager.add_callback('process_terminated', self.on_process_terminated)
-        self.process_manager.add_callback('msfs_status_changed', self.on_msfs_status_changed)
-    
-    def on_process_started(self, entry_name, managed_proc):
-        """Called when a process starts"""
-        self.update_status(f"🟢 Started: {entry_name}")
-        self.update_table_process_status()
-    
-    def on_process_stopped(self, entry_name, managed_proc):
-        """Called when a process stops naturally"""
-        self.update_status(f"🔴 Stopped: {entry_name}")
-        self.update_table_process_status()
         
-    def on_process_terminated(self, entry_name, managed_proc):
-        """Called when a process is terminated"""
-        self.update_status(f"🛑 Terminated: {entry_name}")
-        self.update_table_process_status()
+        # Start monitor if enabled
+        if self.monitor_enabled:
+            self.process_monitor.start_monitoring()
+
+    def setup_monitor_callbacks(self):
+        """Setup callbacks for monitor events"""
+        self.process_monitor.add_callback('msfs_started', self.on_msfs_started)
+        self.process_monitor.add_callback('msfs_stopped', self.on_msfs_stopped)
+        self.process_monitor.add_callback('addon_terminated', self.on_addon_terminated)
+        self.process_monitor.add_callback('state_changed', self.on_monitor_state_changed)
     
-    def on_msfs_status_changed(self, is_running):
-        """Called when MSFS status changes"""
+    def on_msfs_started(self):
+        """Called when MSFS starts"""
+        self.update_status("🟢 MSFS detected - monitoring active")
+    
+    def on_msfs_stopped(self):
+        """Called when MSFS stops"""
+        self.update_status("🔴 MSFS stopped - terminated addon processes")
+        
+    def on_addon_terminated(self, process_info):
+        """Called when an addon is terminated"""
+        self.update_status(f"🛑 Terminated: {process_info.name}")
+    
+    def on_monitor_state_changed(self, old_state, new_state):
+        """Called when monitor state changes"""
         if hasattr(self, 'monitor_status_label'):
-            if is_running:
-                self.monitor_status_label.setText("MSFS: Running")
-                self.update_status("✈️ MSFS detected")
-            else:
-                self.monitor_status_label.setText("MSFS: Stopped")
-                self.update_status("⏹️ MSFS stopped - cleaning up processes")
+            if new_state == MonitorState.WAITING_FOR_MSFS:
+                self.update_status("⏳ Waiting for MSFS to start...")
+                self.monitor_status_label.setText("Monitoring: Waiting for MSFS")
+            elif new_state == MonitorState.MONITORING:
+                self.update_status("👁️ Monitoring MSFS and addons")
+                self.monitor_status_label.setText("Monitoring: Active")
+            elif new_state == MonitorState.CLEANING_UP:
+                self.update_status("🧹 Cleaning up addon processes")
+                self.monitor_status_label.setText("Monitoring: Cleaning up")
+            elif new_state == MonitorState.STOPPED:
+                self.update_status("⏹️ Process monitoring stopped")
+                self.monitor_status_label.setText("Monitoring: Disabled")
 
     def load_monitor_setting(self):
         """Load monitor enabled setting"""
@@ -283,20 +289,12 @@ class MainWindow(QMainWindow):
         settings_action = QAction('Settings...', self)
         file_menu.addAction(settings_action)
         
-        # Add Tools menu with process management
+        # Add Tools menu
         tools_menu = menubar.addMenu('Tools')
-        
-        process_submenu = tools_menu.addMenu('Process Management')
-        
-        terminate_all_action = QAction('Terminate All Processes', self)
-        terminate_all_action.triggered.connect(self.terminate_all_processes)
-        process_submenu.addAction(terminate_all_action)
-        
-        process_submenu.addSeparator()
         
         monitor_status_action = QAction('Process Monitor Status...', self)
         monitor_status_action.triggered.connect(self.show_monitor_status)
-        process_submenu.addAction(monitor_status_action)
+        tools_menu.addAction(monitor_status_action)
         
         # Help menu
         help_menu = menubar.addMenu('Help')
@@ -391,17 +389,12 @@ class MainWindow(QMainWindow):
         run_btn = ModernButton("Run", "▶️")
         run_btn.clicked.connect(self.run_entry)
         
-        # Add terminate button
-        terminate_btn = ModernButton("Terminate", "⏹️")
-        terminate_btn.clicked.connect(self.terminate_entry)
-        
         entry_layout.addWidget(entry_label)
         entry_layout.addStretch()
         entry_layout.addWidget(add_btn)
         entry_layout.addWidget(modify_btn)
         entry_layout.addWidget(remove_btn)
         entry_layout.addWidget(run_btn)
-        entry_layout.addWidget(terminate_btn)
         
         layout.addLayout(entry_layout)
         
@@ -413,16 +406,16 @@ class MainWindow(QMainWindow):
         monitor_label.setObjectName("sectionTitle")
         
         # Monitor enable checkbox
-        self.monitor_check = QCheckBox("Auto-terminate processes when MSFS closes")
+        self.monitor_check = QCheckBox("Auto-terminate addons when MSFS closes")
         self.monitor_check.setChecked(self.monitor_enabled)
         self.monitor_check.toggled.connect(self.toggle_monitor)
         self.monitor_check.setToolTip(
-            "When enabled, launched processes will be automatically terminated when MSFS closes.\n"
+            "When enabled, launched addons will be automatically terminated when MSFS closes.\n"
             "This helps prevent addon processes from running in the background."
         )
         
         # Monitor status label
-        self.monitor_status_label = QLabel("MSFS: Unknown")
+        self.monitor_status_label = QLabel("Monitoring: Disabled")
         self.monitor_status_label.setObjectName("statusLabel")
         
         monitor_layout.addWidget(monitor_label)
@@ -463,66 +456,45 @@ class MainWindow(QMainWindow):
         self.save_monitor_setting(enabled)
         
         if enabled:
-            # Monitoring will start automatically when first process is launched
-            self.update_status("Per-entry process monitoring enabled")
-            self.monitor_status_label.setText("Monitor: Enabled")
+            self.process_monitor.start_monitoring()
+            self.monitor_status_label.setText("Monitoring: Starting...")
+            self.update_status("Process monitoring enabled")
         else:
-            # Stop monitoring and optionally terminate processes
-            if self.process_manager._monitoring_active:
-                reply = QMessageBox.question(
-                    self,
-                    "Disable Monitoring",
-                    "Do you want to terminate all managed processes?",
-                    QMessageBox.Yes | QMessageBox.No,
-                    QMessageBox.No
-                )
-                
-                if reply == QMessageBox.Yes:
-                    self.process_manager.terminate_all_managed_processes()
-                
-                self.process_manager.stop_monitoring()
-            
-            self.update_status("Per-entry process monitoring disabled")
-            self.monitor_status_label.setText("Monitor: Disabled")
+            self.process_monitor.stop_monitoring()
+            self.monitor_status_label.setText("Monitoring: Disabled")
+            self.update_status("Process monitoring disabled")
 
     def show_monitor_status(self):
         """Show detailed monitor status dialog"""
-        processes_info = self.process_manager.get_all_processes_info()
-        msfs_running = self.process_manager.is_msfs_running()
+        status = self.process_monitor.get_status()
         
-        text = f"<h3>Per-Entry Process Monitor Status</h3>"
-        text += f"<b>MSFS Running:</b> {'Yes' if msfs_running else 'No'}<br>"
-        text += f"<b>Monitoring Active:</b> {'Yes' if self.process_manager._monitoring_active else 'No'}<br>"
-        text += f"<b>Managed Processes:</b> {len(processes_info)}<br><br>"
+        text = f"<h3>Process Monitor Status</h3>"
+        text += f"<b>State:</b> {status['state'].title()}<br>"
+        text += f"<b>MSFS Running:</b> {'Yes' if status['msfs_running'] else 'No'}<br>"
         
-        if processes_info:
-            text += "<b>Process Details:</b><br>"
-            for name, info in processes_info.items():
-                if info:
-                    uptime = ""
-                    if info['uptime']:
-                        uptime_mins = int(info['uptime'] // 60)
-                        uptime = f" - Running {uptime_mins}m"
-                    
-                    auto_term = "Auto-terminate" if info['auto_terminate'] else "Manual"
-                    text += f"• <b>{name}</b>: {info['state'].title()} (PID: {info['pid']}) - {auto_term}{uptime}<br>"
+        if status['msfs_pids']:
+            text += f"<b>MSFS PIDs:</b> {', '.join(map(str, status['msfs_pids']))}<br>"
+        
+        text += f"<b>Tracked Processes:</b> {status['tracked_processes']}<br><br>"
+        
+        if status['tracked_process_list']:
+            text += "<b>Currently Tracked:</b><br>"
+            for proc in status['tracked_process_list']:
+                uptime_mins = int(proc['uptime'] // 60)
+                text += f"• {proc['name']} (PID: {proc['pid']}) - Running {uptime_mins}m<br>"
         else:
-            text += "<i>No processes currently managed.</i>"
+            text += "<i>No processes currently being tracked.</i>"
         
         QMessageBox.information(self, "Process Monitor Status", text)
 
     def create_table(self):
         self.table = QTableWidget()
-        self.table.setColumnCount(5)  # Added one more column for process status
-        self.table.setHorizontalHeaderLabels(["Enabled", "Name", "Path", "Arguments", "Status"])
+        self.table.setColumnCount(4)
+        self.table.setHorizontalHeaderLabels(["Enabled", "Name", "Path", "Arguments"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setAlternatingRowColors(True)
         self.table.setShowGrid(False)
         self.table.itemChanged.connect(self.on_item_changed)
-        
-        # Add context menu
-        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.table.customContextMenuRequested.connect(self.show_table_context_menu)
         
         # Modern table styling
         self.table.setObjectName("modernTable")
@@ -534,203 +506,15 @@ class MainWindow(QMainWindow):
         header.setSectionResizeMode(1, QHeaderView.Interactive)
         header.setSectionResizeMode(2, QHeaderView.Stretch)
         header.setSectionResizeMode(3, QHeaderView.Interactive)
-        header.setSectionResizeMode(4, QHeaderView.Fixed)
         
         # Set column widths
-        self.table.setColumnWidth(0, 80)   # Enabled
-        self.table.setColumnWidth(1, 200)  # Name
-        self.table.setColumnWidth(3, 150)  # Arguments
-        self.table.setColumnWidth(4, 100)  # Status
+        self.table.setColumnWidth(0, 80)
+        self.table.setColumnWidth(1, 200)
+        self.table.setColumnWidth(3, 150)
         
         # Row height
         self.table.verticalHeader().setDefaultSectionSize(40)
         self.table.verticalHeader().hide()
-
-    def show_table_context_menu(self, position):
-        """Show context menu for table entries"""
-        if not self.table.itemAt(position):
-            return
-        
-        rows = self.table.selectionModel().selectedRows()
-        if not rows:
-            return
-        
-        index = rows[0].row()
-        entry = self.manager.entries[index]
-        is_running = self.process_manager.is_process_running(entry.name)
-        
-        menu = QMenu(self)
-        menu.setStyleSheet("""
-            QMenu {
-                background-color: #1b1b1c;
-                color: #cccccc;
-                border: 1px solid #3e3e42;
-            }
-            QMenu::item {
-                padding: 8px 16px;
-                border-bottom: 1px solid #2d2d30;
-            }
-            QMenu::item:selected {
-                background-color: #094771;
-                color: #ffffff;
-            }
-        """)
-        
-        # Run/Terminate action
-        if is_running:
-            terminate_action = menu.addAction("🛑 Terminate Process")
-            terminate_action.triggered.connect(lambda: self.terminate_specific_entry(entry.name))
-            
-            restart_action = menu.addAction("🔄 Restart Process")
-            restart_action.triggered.connect(lambda: self.restart_specific_entry(index))
-        else:
-            run_action = menu.addAction("▶️ Run Process")
-            run_action.triggered.connect(lambda: self.run_specific_entry(index))
-        
-        menu.addSeparator()
-        
-        # Edit action
-        edit_action = menu.addAction("✏️ Modify Entry")
-        edit_action.triggered.connect(self.modify_entry)
-        
-        # Remove action
-        remove_action = menu.addAction("🗑️ Remove Entry")
-        remove_action.triggered.connect(self.remove_entry)
-        
-        menu.addSeparator()
-        
-        # Process info action
-        info_action = menu.addAction("ℹ️ Process Info")
-        info_action.triggered.connect(lambda: self.show_process_info(entry.name))
-        
-        menu.exec(self.table.mapToGlobal(position))
-
-    def terminate_specific_entry(self, entry_name):
-        """Terminate a specific entry by name"""
-        if self.process_manager.terminate_process(entry_name):
-            self.update_status(f"Terminated: {entry_name}")
-            self.update_table_process_status()
-        else:
-            QMessageBox.critical(self, "Error", f"Failed to terminate '{entry_name}'")
-
-    def run_specific_entry(self, index):
-        """Run a specific entry by index"""
-        entry = self.manager.entries[index]
-        auto_terminate = self.monitor_enabled
-        
-        success = self.process_manager.launch_process(
-            entry_name=entry.name,
-            executable_path=entry.path,
-            args=entry.args,
-            auto_terminate=auto_terminate,
-            msfs_dependent=True
-        )
-        
-        if success:
-            self.update_status(f"Launched: {entry.name}")
-            self.update_table_process_status()
-        else:
-            QMessageBox.critical(self, "Error", f"Failed to launch '{entry.name}'")
-
-    def restart_specific_entry(self, index):
-        """Restart a specific entry"""
-        entry = self.manager.entries[index]
-        
-        # Terminate first
-        if self.process_manager.terminate_process(entry.name):
-            # Wait a moment
-            time.sleep(1)
-            
-            # Then start again
-            auto_terminate = self.monitor_enabled
-            success = self.process_manager.launch_process(
-                entry_name=entry.name,
-                executable_path=entry.path,
-                args=entry.args,
-                auto_terminate=auto_terminate,
-                msfs_dependent=True
-            )
-            
-            if success:
-                self.update_status(f"Restarted: {entry.name}")
-                self.update_table_process_status()
-            else:
-                QMessageBox.critical(self, "Error", f"Failed to restart '{entry.name}'")
-
-    def show_process_info(self, entry_name):
-        """Show detailed process information"""
-        process_info = self.process_manager.get_process_info(entry_name)
-        
-        if not process_info:
-            QMessageBox.information(self, "Process Info", f"No process information available for '{entry_name}'")
-            return
-        
-        text = f"<h3>Process Information: {entry_name}</h3>"
-        text += f"<b>Status:</b> {process_info['state'].title()}<br>"
-        text += f"<b>Executable:</b> {process_info['name']}<br>"
-        text += f"<b>Path:</b> {process_info['path']}<br>"
-        text += f"<b>Arguments:</b> {process_info['args'] or 'None'}<br>"
-        text += f"<b>Auto-terminate:</b> {'Yes' if process_info['auto_terminate'] else 'No'}<br>"
-        text += f"<b>MSFS Dependent:</b> {'Yes' if process_info['msfs_dependent'] else 'No'}<br>"
-        
-        if process_info['pid']:
-            text += f"<b>Process ID:</b> {process_info['pid']}<br>"
-        
-        if process_info['uptime']:
-            uptime_mins = int(process_info['uptime'] // 60)
-            uptime_secs = int(process_info['uptime'] % 60)
-            text += f"<b>Uptime:</b> {uptime_mins}m {uptime_secs}s<br>"
-        
-        QMessageBox.information(self, "Process Information", text)
-
-    def terminate_all_processes(self):
-        """Terminate all running managed processes"""
-        managed_processes = self.process_manager.get_all_processes_info()
-        running_processes = [name for name, info in managed_processes.items() 
-                           if info and info['state'] == 'running']
-        
-        if not running_processes:
-            QMessageBox.information(self, "No Running Processes", "No processes are currently running.")
-            return
-        
-        reply = QMessageBox.question(
-            self,
-            "Terminate All Processes",
-            f"Are you sure you want to terminate all {len(running_processes)} running processes?\n\n"
-            f"{', '.join(running_processes)}",
-            QMessageBox.Yes | QMessageBox.No
-        )
-        
-        if reply == QMessageBox.Yes:
-            self.process_manager.terminate_all_managed_processes()
-            self.update_status(f"Terminated {len(running_processes)} processes")
-            self.update_table_process_status()
-
-    def update_table_process_status(self):
-        """Update the process status column in the table"""
-        for row, entry in enumerate(self.manager.entries):
-            # Get process info
-            process_info = self.process_manager.get_process_info(entry.name)
-            
-            if process_info:
-                state = process_info['state']
-                if state == 'running':
-                    status_text = "🟢 Running"
-                elif state == 'starting':
-                    status_text = "🟡 Starting"
-                elif state == 'terminated':
-                    status_text = "🛑 Terminated"
-                elif state == 'error':
-                    status_text = "❌ Error"
-                else:
-                    status_text = "⚫ Stopped"
-            else:
-                status_text = ""
-            
-            # Update status item
-            status_item = QTableWidgetItem(status_text)
-            status_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
-            self.table.setItem(row, 4, status_item)
 
     def create_status(self):
         layout = QHBoxLayout()
@@ -952,7 +736,7 @@ class MainWindow(QMainWindow):
             f"<li>Automatic backups for safety</li>"
             f"<li>Preset management</li>"
             f"<li>Support for MSFS2020 and MSFS2024</li>"
-            f"<li>Per-entry process monitoring and management</li>"
+            f"<li>Optional process monitoring to auto-terminate addons</li>"
             f"</ul>"
             f"<p>Your original exe.xml files are automatically backed up before any changes.</p>"
         )
@@ -971,9 +755,6 @@ class MainWindow(QMainWindow):
         # Clear current data
         self.manager = ExeXmlManager()
         self.populate_table()
-        
-        # Clean up any managed processes from previous version
-        self.process_manager.cleanup_all()
         
         # Try auto-load for new version
         self.auto_load_exe()
@@ -1080,14 +861,8 @@ class MainWindow(QMainWindow):
             args_item = QTableWidgetItem(entry.args)
             args_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
             self.table.setItem(row, 3, args_item)
-            
-            # Status (initially empty)
-            status_item = QTableWidgetItem("")
-            status_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
-            self.table.setItem(row, 4, status_item)
         
         self.table.blockSignals(False)
-        self.update_table_process_status()
         self.update_status()
 
     def on_item_changed(self, item):
@@ -1149,27 +924,12 @@ class MainWindow(QMainWindow):
         )
         
         if reply == QMessageBox.Yes:
-            # Terminate process if running and clean up from manager
-            if self.process_manager.is_process_running(entry_name):
-                terminate_reply = QMessageBox.question(
-                    self, "Process Running", 
-                    f"'{entry_name}' is currently running. Terminate it?",
-                    QMessageBox.Yes | QMessageBox.No
-                )
-                
-                if terminate_reply == QMessageBox.Yes:
-                    self.process_manager.terminate_process(entry_name)
-            
-            # Clean up from process manager
-            self.process_manager.cleanup_process(entry_name)
-            
             # Create backup before first modification if needed
             if settings.is_first_time_using_file(self.manager.filepath, self.current_version):
                 backup_created, backup_path, error = settings.auto_backup_if_needed(self.manager.filepath, self.current_version)
                 if backup_created:
                     self.update_status(f"Backup created: {os.path.basename(backup_path)}")
             
-            # Remove from exe.xml manager
             self.manager.remove_entry(index)
             self.populate_table()
             self.update_status("Entry removed")
@@ -1181,64 +941,24 @@ class MainWindow(QMainWindow):
             return
         
         index = rows[0].row()
-        entry = self.manager.entries[index]
-        
-        # Check if already running
-        if self.process_manager.is_process_running(entry.name):
-            reply = QMessageBox.question(
-                self, "Process Running", 
-                f"'{entry.name}' is already running. Do you want to terminate and restart it?",
-                QMessageBox.Yes | QMessageBox.No
-            )
+        try:
+            entry = self.manager.entries[index]
+            entry_name = entry.name
             
-            if reply == QMessageBox.Yes:
-                self.process_manager.terminate_process(entry.name)
-                time.sleep(1)  # Give it a moment to terminate
+            if self.monitor_enabled and self.process_monitor.state != MonitorState.STOPPED:
+                # Use monitor to launch and track the process
+                pid = self.process_monitor.launch_and_track_process(entry.path, entry.args)
+                if pid:
+                    self.update_status(f"Launched and tracking: {entry_name} (PID: {pid})")
+                else:
+                    raise Exception("Failed to launch process")
             else:
-                return
-        
-        # Launch with monitoring if enabled
-        auto_terminate = self.monitor_enabled
-        success = self.process_manager.launch_process(
-            entry_name=entry.name,
-            executable_path=entry.path,
-            args=entry.args,
-            auto_terminate=auto_terminate,
-            msfs_dependent=True  # Assume all addons depend on MSFS
-        )
-        
-        if success:
-            self.update_status(f"Launched: {entry.name}")
-            self.update_table_process_status()
-        else:
-            QMessageBox.critical(self, "Error", f"Failed to launch '{entry.name}'")
-
-    def terminate_entry(self):
-        """Terminate a running process"""
-        rows = self.table.selectionModel().selectedRows()
-        if not rows:
-            QMessageBox.information(self, "No Selection", "Please select an entry to terminate.")
-            return
-        
-        index = rows[0].row()
-        entry = self.manager.entries[index]
-        
-        if not self.process_manager.is_process_running(entry.name):
-            QMessageBox.information(self, "Not Running", f"'{entry.name}' is not currently running.")
-            return
-        
-        reply = QMessageBox.question(
-            self, "Terminate Process", 
-            f"Are you sure you want to terminate '{entry.name}'?",
-            QMessageBox.Yes | QMessageBox.No
-        )
-        
-        if reply == QMessageBox.Yes:
-            if self.process_manager.terminate_process(entry.name):
-                self.update_status(f"Terminated: {entry.name}")
-                self.update_table_process_status()
-            else:
-                QMessageBox.critical(self, "Error", f"Failed to terminate '{entry.name}'")
+                # Use original method (no tracking)
+                self.manager.execute_entry(index)
+                self.update_status(f"Launched: {entry_name}")
+                
+        except Exception as e:
+            QMessageBox.critical(self, "Error", str(e))
 
     def modify_entry(self):
         if not self.manager.filepath:
@@ -1266,17 +986,7 @@ class MainWindow(QMainWindow):
                 if backup_created:
                     self.update_status(f"Backup created: {os.path.basename(backup_path)}")
             
-            old_name = entry.name
             name, path, args, enabled = dlg.get_data()
-            
-            # If name changed, update process manager tracking
-            if old_name != name and self.process_manager.is_process_running(old_name):
-                # Transfer process tracking to new name
-                process_info = self.process_manager.managed_processes.get(old_name)
-                if process_info:
-                    self.process_manager.managed_processes[name] = process_info
-                    del self.process_manager.managed_processes[old_name]
-            
             self.manager.modify_entry(index, name, path, args, enabled)
             self.populate_table()
             self.update_status("Entry modified")
@@ -1343,18 +1053,13 @@ class MainWindow(QMainWindow):
     # -------------------------
     def closeEvent(self, event):
         """Handle application close"""
-        if self.process_manager._monitoring_active:
+        if self.process_monitor.state != MonitorState.STOPPED:
             # Ask user if they want to terminate tracked processes
-            managed_processes = self.process_manager.get_all_processes_info()
-            running_processes = [name for name, info in managed_processes.items() 
-                               if info and info['state'] == 'running']
-            
-            if running_processes:
+            if self.process_monitor.launched_processes:
                 reply = QMessageBox.question(
                     self,
-                    "Running Processes",
-                    f"There are {len(running_processes)} addon processes running:\n\n"
-                    f"{', '.join(running_processes)}\n\n"
+                    "Tracked Processes",
+                    f"There are {len(self.process_monitor.launched_processes)} addon processes being tracked.\n\n"
                     "Do you want to terminate them before closing?",
                     QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
                     QMessageBox.No
@@ -1364,9 +1069,9 @@ class MainWindow(QMainWindow):
                     event.ignore()
                     return
                 elif reply == QMessageBox.Yes:
-                    self.process_manager.terminate_all_managed_processes()
+                    self.process_monitor.terminate_tracked_processes()
             
-            self.process_manager.cleanup_all()
+            self.process_monitor.stop_monitoring()
         
         event.accept()
     
