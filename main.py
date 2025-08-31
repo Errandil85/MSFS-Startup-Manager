@@ -1,6 +1,5 @@
 import sys
 import os
-import subprocess
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, QWidget, 
     QTableWidget, QTableWidgetItem, QPushButton, QComboBox, QLabel,
@@ -13,9 +12,6 @@ from exexml import ExeXmlManager
 from views.add_edit_dialog import AddEditDialog
 import settings
 from PySide6.QtGui import QIcon
-
-# Import the process monitor
-from process_monitor import MSFSProcessMonitor, MonitorState
 
 
 class BackupDialog(QMessageBox):
@@ -168,13 +164,6 @@ class MainWindow(QMainWindow):
         s = settings.load_settings()
         self.current_version = s.get("version", "MSFS2020")
         
-        # Add process monitor
-        self.process_monitor = MSFSProcessMonitor()
-        self.setup_monitor_callbacks()
-        
-        # Monitor enabled state (load from settings)
-        self.monitor_enabled = self.load_monitor_setting()
-        
         # Create menu bar
         self.create_menu_bar()
 
@@ -208,57 +197,6 @@ class MainWindow(QMainWindow):
         
         # Auto load with detection
         self.auto_load_exe()
-        
-        # Start monitor if enabled
-        if self.monitor_enabled:
-            self.process_monitor.start_monitoring()
-
-    def setup_monitor_callbacks(self):
-        """Setup callbacks for monitor events"""
-        self.process_monitor.add_callback('msfs_started', self.on_msfs_started)
-        self.process_monitor.add_callback('msfs_stopped', self.on_msfs_stopped)
-        self.process_monitor.add_callback('addon_terminated', self.on_addon_terminated)
-        self.process_monitor.add_callback('state_changed', self.on_monitor_state_changed)
-    
-    def on_msfs_started(self):
-        """Called when MSFS starts"""
-        self.update_status("🟢 MSFS detected - monitoring active")
-    
-    def on_msfs_stopped(self):
-        """Called when MSFS stops"""
-        self.update_status("🔴 MSFS stopped - terminated addon processes")
-        
-    def on_addon_terminated(self, process_info):
-        """Called when an addon is terminated"""
-        self.update_status(f"🛑 Terminated: {process_info.name}")
-    
-    def on_monitor_state_changed(self, old_state, new_state):
-        """Called when monitor state changes"""
-        if hasattr(self, 'monitor_status_label'):
-            if new_state == MonitorState.WAITING_FOR_MSFS:
-                self.update_status("⏳ Waiting for MSFS to start...")
-                self.monitor_status_label.setText("Monitoring: Waiting for MSFS")
-            elif new_state == MonitorState.MONITORING:
-                self.update_status("👁️ Monitoring MSFS and addons")
-                self.monitor_status_label.setText("Monitoring: Active")
-            elif new_state == MonitorState.CLEANING_UP:
-                self.update_status("🧹 Cleaning up addon processes")
-                self.monitor_status_label.setText("Monitoring: Cleaning up")
-            elif new_state == MonitorState.STOPPED:
-                self.update_status("⏹️ Process monitoring stopped")
-                self.monitor_status_label.setText("Monitoring: Disabled")
-
-    def load_monitor_setting(self):
-        """Load monitor enabled setting"""
-        s = settings.load_settings()
-        return s.get("monitor_enabled", False)
-    
-    def save_monitor_setting(self, enabled):
-        """Save monitor enabled setting"""
-        s = settings.load_settings()
-        s["monitor_enabled"] = enabled
-        settings.save_settings(s)
-        self.monitor_enabled = enabled
 
     def create_menu_bar(self):
         menubar = self.menuBar()
@@ -288,13 +226,6 @@ class MainWindow(QMainWindow):
         # Settings
         settings_action = QAction('Settings...', self)
         file_menu.addAction(settings_action)
-        
-        # Add Tools menu
-        tools_menu = menubar.addMenu('Tools')
-        
-        monitor_status_action = QAction('Process Monitor Status...', self)
-        monitor_status_action.triggered.connect(self.show_monitor_status)
-        tools_menu.addAction(monitor_status_action)
         
         # Help menu
         help_menu = menubar.addMenu('Help')
@@ -398,33 +329,6 @@ class MainWindow(QMainWindow):
         
         layout.addLayout(entry_layout)
         
-        # Add Monitor Controls Section
-        monitor_layout = QHBoxLayout()
-        monitor_layout.setSpacing(12)
-        
-        monitor_label = ModernLabel("Process Monitor")
-        monitor_label.setObjectName("sectionTitle")
-        
-        # Monitor enable checkbox
-        self.monitor_check = QCheckBox("Auto-terminate addons when MSFS closes")
-        self.monitor_check.setChecked(self.monitor_enabled)
-        self.monitor_check.toggled.connect(self.toggle_monitor)
-        self.monitor_check.setToolTip(
-            "When enabled, launched addons will be automatically terminated when MSFS closes.\n"
-            "This helps prevent addon processes from running in the background."
-        )
-        
-        # Monitor status label
-        self.monitor_status_label = QLabel("Monitoring: Disabled")
-        self.monitor_status_label.setObjectName("statusLabel")
-        
-        monitor_layout.addWidget(monitor_label)
-        monitor_layout.addWidget(self.monitor_check)
-        monitor_layout.addStretch()
-        monitor_layout.addWidget(self.monitor_status_label)
-        
-        layout.addLayout(monitor_layout)
-        
         # Preset operations
         preset_layout = QHBoxLayout()
         preset_layout.setSpacing(12)
@@ -450,42 +354,6 @@ class MainWindow(QMainWindow):
         layout.addLayout(preset_layout)
         
         return layout
-
-    def toggle_monitor(self, enabled):
-        """Toggle process monitoring on/off"""
-        self.save_monitor_setting(enabled)
-        
-        if enabled:
-            self.process_monitor.start_monitoring()
-            self.monitor_status_label.setText("Monitoring: Starting...")
-            self.update_status("Process monitoring enabled")
-        else:
-            self.process_monitor.stop_monitoring()
-            self.monitor_status_label.setText("Monitoring: Disabled")
-            self.update_status("Process monitoring disabled")
-
-    def show_monitor_status(self):
-        """Show detailed monitor status dialog"""
-        status = self.process_monitor.get_status()
-        
-        text = f"<h3>Process Monitor Status</h3>"
-        text += f"<b>State:</b> {status['state'].title()}<br>"
-        text += f"<b>MSFS Running:</b> {'Yes' if status['msfs_running'] else 'No'}<br>"
-        
-        if status['msfs_pids']:
-            text += f"<b>MSFS PIDs:</b> {', '.join(map(str, status['msfs_pids']))}<br>"
-        
-        text += f"<b>Tracked Processes:</b> {status['tracked_processes']}<br><br>"
-        
-        if status['tracked_process_list']:
-            text += "<b>Currently Tracked:</b><br>"
-            for proc in status['tracked_process_list']:
-                uptime_mins = int(proc['uptime'] // 60)
-                text += f"• {proc['name']} (PID: {proc['pid']}) - Running {uptime_mins}m<br>"
-        else:
-            text += "<i>No processes currently being tracked.</i>"
-        
-        QMessageBox.information(self, "Process Monitor Status", text)
 
     def create_table(self):
         self.table = QTableWidget()
@@ -736,7 +604,6 @@ class MainWindow(QMainWindow):
             f"<li>Automatic backups for safety</li>"
             f"<li>Preset management</li>"
             f"<li>Support for MSFS2020 and MSFS2024</li>"
-            f"<li>Optional process monitoring to auto-terminate addons</li>"
             f"</ul>"
             f"<p>Your original exe.xml files are automatically backed up before any changes.</p>"
         )
@@ -942,21 +809,9 @@ class MainWindow(QMainWindow):
         
         index = rows[0].row()
         try:
-            entry = self.manager.entries[index]
-            entry_name = entry.name
-            
-            if self.monitor_enabled and self.process_monitor.state != MonitorState.STOPPED:
-                # Use monitor to launch and track the process
-                pid = self.process_monitor.launch_and_track_process(entry.path, entry.args)
-                if pid:
-                    self.update_status(f"Launched and tracking: {entry_name} (PID: {pid})")
-                else:
-                    raise Exception("Failed to launch process")
-            else:
-                # Use original method (no tracking)
-                self.manager.execute_entry(index)
-                self.update_status(f"Launched: {entry_name}")
-                
+            entry_name = self.manager.entries[index].name
+            self.manager.execute_entry(index)
+            self.update_status(f"Launched {entry_name}")
         except Exception as e:
             QMessageBox.critical(self, "Error", str(e))
 
@@ -1048,32 +903,6 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to save preset: {str(e)}")
 
-    # -------------------------
-    # Application Cleanup
-    # -------------------------
-    def closeEvent(self, event):
-        """Handle application close"""
-        if self.process_monitor.state != MonitorState.STOPPED:
-            # Ask user if they want to terminate tracked processes
-            if self.process_monitor.launched_processes:
-                reply = QMessageBox.question(
-                    self,
-                    "Tracked Processes",
-                    f"There are {len(self.process_monitor.launched_processes)} addon processes being tracked.\n\n"
-                    "Do you want to terminate them before closing?",
-                    QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
-                    QMessageBox.No
-                )
-                
-                if reply == QMessageBox.Cancel:
-                    event.ignore()
-                    return
-                elif reply == QMessageBox.Yes:
-                    self.process_monitor.terminate_tracked_processes()
-            
-            self.process_monitor.stop_monitoring()
-        
-        event.accept()
     
     def resource_path(relative_path):
         """ Get absolute path to resource, works for dev and PyInstaller """
