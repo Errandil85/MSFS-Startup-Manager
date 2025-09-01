@@ -170,6 +170,7 @@ class MainWindow(QMainWindow):
         self.process_monitor = ProcessMonitor()
         self.process_monitor.sim_stopped.connect(self.on_simulator_stopped)
         self.process_monitor.addon_started.connect(self.on_addon_started)
+        self.process_monitor.addon_stopped.connect(self.on_addon_stopped)  # Added this line
         self.running_addons = {}  # addon_name -> process info
         
         # Create menu bar
@@ -692,6 +693,9 @@ class MainWindow(QMainWindow):
             s["paths"] = paths
             settings.save_settings(s)
             
+            # Update process monitoring for auto-close entries
+            self.update_process_monitoring()
+            
             # Determine installation type and update status
             install_type = settings.get_installation_type(path)
             self.update_status(f"Loaded {os.path.basename(path)} ({install_type})")
@@ -718,6 +722,19 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Error", str(e))
             self.update_status("Error saving file")
+
+    def update_process_monitoring(self):
+        """Update process monitoring for all auto-close entries"""
+        # Clear current monitoring
+        for addon_name in list(self.running_addons.keys()):
+            self.process_monitor.remove_addon_from_monitor(addon_name)
+        self.running_addons.clear()
+        
+        # Add all auto-close entries to monitoring
+        for entry in self.manager.entries:
+            if entry.auto_close and os.path.exists(entry.path):
+                self.process_monitor.add_addon_to_monitor(entry.name, entry.path)
+                print(f"Monitoring {entry.name} for auto-close")
 
     # -------------------------
     # Table Handling
@@ -780,6 +797,17 @@ class MainWindow(QMainWindow):
             
             # Update auto-close setting (stored separately, not in XML)
             self.manager.set_auto_close(row, auto_close)
+            
+            # Update process monitoring
+            entry = self.manager.entries[row]
+            if auto_close and os.path.exists(entry.path):
+                self.process_monitor.add_addon_to_monitor(entry.name, entry.path)
+                print(f"Added {entry.name} to auto-close monitoring")
+            elif not auto_close:
+                self.process_monitor.remove_addon_from_monitor(entry.name)
+                if entry.name in self.running_addons:
+                    del self.running_addons[entry.name]
+                print(f"Removed {entry.name} from auto-close monitoring")
         
         try:
             self.manager.save()
@@ -806,6 +834,12 @@ class MainWindow(QMainWindow):
             name, path, args, enabled, auto_close = dlg.get_data()
             self.manager.add_entry(name, path, args, enabled, auto_close)
             self.populate_table()
+            
+            # Add to process monitoring if auto-close is enabled
+            if auto_close and os.path.exists(path):
+                self.process_monitor.add_addon_to_monitor(name, path)
+                print(f"Added new entry {name} to auto-close monitoring")
+            
             self.update_status("Entry added")
 
     def remove_entry(self):
@@ -839,6 +873,7 @@ class MainWindow(QMainWindow):
             if entry.name in self.running_addons:
                 self.process_monitor.remove_addon_from_monitor(entry.name)
                 del self.running_addons[entry.name]
+                print(f"Removed {entry.name} from monitoring")
             
             self.manager.remove_entry(index)
             self.populate_table()
@@ -863,6 +898,7 @@ class MainWindow(QMainWindow):
                     'path': entry.path,
                     'auto_close': True
                 }
+                print(f"Started monitoring {entry.name} for auto-close (PID: {process.pid})")
             
             self.update_status(f"Launched {entry.name}")
             
@@ -896,8 +932,20 @@ class MainWindow(QMainWindow):
                 if backup_created:
                     self.update_status(f"Backup created: {os.path.basename(backup_path)}")
             
+            # Remove old monitoring
+            old_name = entry.name
+            if old_name in self.running_addons:
+                self.process_monitor.remove_addon_from_monitor(old_name)
+                del self.running_addons[old_name]
+            
             name, path, args, enabled, auto_close = dlg.get_data()
             self.manager.modify_entry(index, name, path, args, enabled, auto_close)
+            
+            # Add new monitoring if auto-close is enabled
+            if auto_close and os.path.exists(path):
+                self.process_monitor.add_addon_to_monitor(name, path)
+                print(f"Updated monitoring for {name}")
+            
             self.populate_table()
             self.update_status("Entry modified")
 
@@ -930,6 +978,10 @@ class MainWindow(QMainWindow):
         try:
             self.manager.load_preset(path)
             self.populate_table()
+            
+            # Update process monitoring after loading preset
+            self.update_process_monitoring()
+            
             s = settings.load_settings()
             s[f"last_preset_{self.current_version}"] = name
             settings.save_settings(s)
@@ -964,19 +1016,40 @@ class MainWindow(QMainWindow):
     def on_simulator_stopped(self, sim_name):
         """Called when the simulator process stops"""
         auto_close_count = 0
+        addons_to_close = []
+        
+        print(f"Simulator stopped: {sim_name}")
         
         # Find all entries that should be auto-closed
         for entry in self.manager.entries:
             if entry.auto_close and entry.name in self.running_addons:
-                try:
-                    terminated = self.process_monitor.terminate_addon_processes(entry.name)
-                    if terminated > 0:
-                        auto_close_count += terminated
-                        # Remove from tracking
-                        del self.running_addons[entry.name]
-                        self.process_monitor.remove_addon_from_monitor(entry.name)
-                except Exception as e:
-                    print(f"Error closing {entry.name}: {e}")
+                addons_to_close.append(entry.name)
+        
+        # Also check for any running addon processes that should be auto-closed
+        for addon_name in self.process_monitor.get_running_addons():
+            # Find the entry for this addon
+            for entry in self.manager.entries:
+                if entry.name == addon_name and entry.auto_close:
+                    if addon_name not in addons_to_close:
+                        addons_to_close.append(addon_name)
+                    break
+        
+        print(f"Addons to auto-close: {addons_to_close}")
+        
+        for addon_name in addons_to_close:
+            try:
+                terminated = self.process_monitor.terminate_addon_processes(addon_name)
+                if terminated > 0:
+                    auto_close_count += terminated
+                    print(f"Auto-closed {terminated} process(es) for {addon_name}")
+                
+                # Remove from tracking
+                if addon_name in self.running_addons:
+                    del self.running_addons[addon_name]
+                self.process_monitor.remove_addon_from_monitor(addon_name)
+                
+            except Exception as e:
+                print(f"Error closing {addon_name}: {e}")
         
         if auto_close_count > 0:
             self.update_status(f"Simulator stopped - Auto-closed {auto_close_count} addon(s)")
@@ -985,8 +1058,22 @@ class MainWindow(QMainWindow):
     
     def on_addon_started(self, addon_name, pid):
         """Called when an addon process starts"""
-        # This can be used for additional tracking if needed
-        pass
+        print(f"Addon process started: {addon_name} (PID: {pid})")
+        # Update our tracking
+        if addon_name not in self.running_addons:
+            # Find the entry to get the path
+            for entry in self.manager.entries:
+                if entry.name == addon_name:
+                    self.running_addons[addon_name] = {
+                        'process': None,  # We don't have the Process object
+                        'path': entry.path,
+                        'auto_close': entry.auto_close
+                    }
+                    break
+
+    def on_addon_stopped(self, addon_name, pid):
+        """Called when an addon process stops"""
+        print(f"Addon process stopped: {addon_name} (PID: {pid})")
     
     def closeEvent(self, event):
         """Handle application closing"""
