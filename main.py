@@ -1,5 +1,6 @@
 import sys
 import os
+import xml.etree.ElementTree as ET
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, QWidget, 
     QTableWidget, QTableWidgetItem, QPushButton, QComboBox, QLabel,
@@ -10,6 +11,7 @@ from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QFont, QIcon, QPalette, QColor, QAction
 from exexml import ExeXmlManager
 from views.add_edit_dialog import AddEditDialog
+from process_monitor import ProcessMonitor
 import settings
 from PySide6.QtGui import QIcon
 
@@ -164,6 +166,12 @@ class MainWindow(QMainWindow):
         s = settings.load_settings()
         self.current_version = s.get("version", "MSFS2020")
         
+        # Process monitoring
+        self.process_monitor = ProcessMonitor()
+        self.process_monitor.sim_stopped.connect(self.on_simulator_stopped)
+        self.process_monitor.addon_started.connect(self.on_addon_started)
+        self.running_addons = {}  # addon_name -> process info
+        
         # Create menu bar
         self.create_menu_bar()
 
@@ -197,6 +205,9 @@ class MainWindow(QMainWindow):
         
         # Auto load with detection
         self.auto_load_exe()
+        
+        # Start process monitoring
+        self.process_monitor.start_monitoring(self.current_version)
 
     def create_menu_bar(self):
         menubar = self.menuBar()
@@ -357,8 +368,8 @@ class MainWindow(QMainWindow):
 
     def create_table(self):
         self.table = QTableWidget()
-        self.table.setColumnCount(4)
-        self.table.setHorizontalHeaderLabels(["Enabled", "Name", "Path", "Arguments"])
+        self.table.setColumnCount(5)  # Added Auto-Close column
+        self.table.setHorizontalHeaderLabels(["Enabled", "Name", "Path", "Arguments", "Auto-Close"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setAlternatingRowColors(True)
         self.table.setShowGrid(False)
@@ -374,11 +385,13 @@ class MainWindow(QMainWindow):
         header.setSectionResizeMode(1, QHeaderView.Interactive)
         header.setSectionResizeMode(2, QHeaderView.Stretch)
         header.setSectionResizeMode(3, QHeaderView.Interactive)
+        header.setSectionResizeMode(4, QHeaderView.Fixed)
         
         # Set column widths
-        self.table.setColumnWidth(0, 80)
-        self.table.setColumnWidth(1, 200)
-        self.table.setColumnWidth(3, 150)
+        self.table.setColumnWidth(0, 80)   # Enabled
+        self.table.setColumnWidth(1, 200)  # Name
+        self.table.setColumnWidth(3, 150)  # Arguments
+        self.table.setColumnWidth(4, 90)   # Auto-Close
         
         # Row height
         self.table.verticalHeader().setDefaultSectionSize(40)
@@ -602,6 +615,7 @@ class MainWindow(QMainWindow):
             f"<ul>"
             f"<li>Auto-detection for Steam and MS Store versions</li>"
             f"<li>Automatic backups for safety</li>"
+            f"<li>Auto-close addons when simulator stops</li>"
             f"<li>Preset management</li>"
             f"<li>Support for MSFS2020 and MSFS2024</li>"
             f"</ul>"
@@ -619,12 +633,19 @@ class MainWindow(QMainWindow):
         self.refresh_presets()
         self.update_status(f"Switched to {version}")
         
+        # Update process monitoring for new version
+        self.process_monitor.stop_monitoring()
+        self.running_addons.clear()
+        
         # Clear current data
         self.manager = ExeXmlManager()
         self.populate_table()
         
         # Try auto-load for new version
         self.auto_load_exe()
+        
+        # Restart monitoring for new version
+        self.process_monitor.start_monitoring(version)
 
     # -------------------------
     # exe.xml Handling
@@ -728,13 +749,22 @@ class MainWindow(QMainWindow):
             args_item = QTableWidgetItem(entry.args)
             args_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
             self.table.setItem(row, 3, args_item)
+            
+            # Auto-Close checkbox
+            auto_close_item = QTableWidgetItem()
+            auto_close_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+            auto_close_item.setCheckState(Qt.Checked if entry.auto_close else Qt.Unchecked)
+            auto_close_item.setTextAlignment(Qt.AlignCenter)
+            auto_close_item.setToolTip("Automatically close this addon when the simulator stops")
+            self.table.setItem(row, 4, auto_close_item)
         
         self.table.blockSignals(False)
         self.update_status()
 
     def on_item_changed(self, item):
+        row = item.row()
+        
         if item.column() == 0:  # Enabled checkbox changed
-            row = item.row()
             enabled = item.checkState() == Qt.Checked
             
             # Create backup before first modification if needed
@@ -744,11 +774,18 @@ class MainWindow(QMainWindow):
                     self.update_status(f"Backup created: {os.path.basename(backup_path)}")
             
             self.manager.set_enabled(row, enabled)
-            try:
-                self.manager.save()
-                self.update_status("Auto-saved changes")
-            except Exception as e:
-                QMessageBox.critical(self, "Error", str(e))
+            
+        elif item.column() == 4:  # Auto-Close checkbox changed
+            auto_close = item.checkState() == Qt.Checked
+            
+            # Update auto-close setting (stored separately, not in XML)
+            self.manager.set_auto_close(row, auto_close)
+        
+        try:
+            self.manager.save()
+            self.update_status("Auto-saved changes")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", str(e))
 
     # -------------------------
     # Entry Handling
@@ -766,8 +803,8 @@ class MainWindow(QMainWindow):
                 if backup_created:
                     self.update_status(f"Backup created: {os.path.basename(backup_path)}")
             
-            name, path, args, enabled = dlg.get_data()
-            self.manager.add_entry(name, path, args, enabled)
+            name, path, args, enabled, auto_close = dlg.get_data()
+            self.manager.add_entry(name, path, args, enabled, auto_close)
             self.populate_table()
             self.update_status("Entry added")
 
@@ -797,6 +834,12 @@ class MainWindow(QMainWindow):
                 if backup_created:
                     self.update_status(f"Backup created: {os.path.basename(backup_path)}")
             
+            # Remove from process monitoring if it was being tracked
+            entry = self.manager.entries[index]
+            if entry.name in self.running_addons:
+                self.process_monitor.remove_addon_from_monitor(entry.name)
+                del self.running_addons[entry.name]
+            
             self.manager.remove_entry(index)
             self.populate_table()
             self.update_status("Entry removed")
@@ -809,9 +852,20 @@ class MainWindow(QMainWindow):
         
         index = rows[0].row()
         try:
-            entry_name = self.manager.entries[index].name
-            self.manager.execute_entry(index)
-            self.update_status(f"Launched {entry_name}")
+            entry = self.manager.entries[index]
+            process = self.manager.execute_entry(index)
+            
+            if process and entry.auto_close:
+                # Track this process for auto-closing
+                self.process_monitor.add_addon_to_monitor(entry.name, entry.path)
+                self.running_addons[entry.name] = {
+                    'process': process,
+                    'path': entry.path,
+                    'auto_close': True
+                }
+            
+            self.update_status(f"Launched {entry.name}")
+            
         except Exception as e:
             QMessageBox.critical(self, "Error", str(e))
 
@@ -833,6 +887,7 @@ class MainWindow(QMainWindow):
         dlg.path_edit.setText(entry.path)
         dlg.args_edit.setText(entry.args)
         dlg.enabled_check.setChecked(entry.enabled)
+        dlg.auto_close_check.setChecked(entry.auto_close)
 
         if dlg.exec():
             # Create backup before first modification if needed
@@ -841,8 +896,8 @@ class MainWindow(QMainWindow):
                 if backup_created:
                     self.update_status(f"Backup created: {os.path.basename(backup_path)}")
             
-            name, path, args, enabled = dlg.get_data()
-            self.manager.modify_entry(index, name, path, args, enabled)
+            name, path, args, enabled, auto_close = dlg.get_data()
+            self.manager.modify_entry(index, name, path, args, enabled, auto_close)
             self.populate_table()
             self.update_status("Entry modified")
 
@@ -903,7 +958,41 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to save preset: {str(e)}")
 
+    # -------------------------
+    # Process Monitoring Handlers
+    # -------------------------
+    def on_simulator_stopped(self, sim_name):
+        """Called when the simulator process stops"""
+        auto_close_count = 0
+        
+        # Find all entries that should be auto-closed
+        for entry in self.manager.entries:
+            if entry.auto_close and entry.name in self.running_addons:
+                try:
+                    terminated = self.process_monitor.terminate_addon_processes(entry.name)
+                    if terminated > 0:
+                        auto_close_count += terminated
+                        # Remove from tracking
+                        del self.running_addons[entry.name]
+                        self.process_monitor.remove_addon_from_monitor(entry.name)
+                except Exception as e:
+                    print(f"Error closing {entry.name}: {e}")
+        
+        if auto_close_count > 0:
+            self.update_status(f"Simulator stopped - Auto-closed {auto_close_count} addon(s)")
+        else:
+            self.update_status(f"Simulator stopped ({sim_name})")
     
+    def on_addon_started(self, addon_name, pid):
+        """Called when an addon process starts"""
+        # This can be used for additional tracking if needed
+        pass
+    
+    def closeEvent(self, event):
+        """Handle application closing"""
+        self.process_monitor.stop_monitoring()
+        event.accept()
+
     def resource_path(relative_path):
         """ Get absolute path to resource, works for dev and PyInstaller """
         if hasattr(sys, "_MEIPASS"):
