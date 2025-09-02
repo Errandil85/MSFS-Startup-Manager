@@ -24,7 +24,7 @@ class AddEditDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setModal(True)
-        self.setMinimumSize(500, 350)
+        self.setMinimumSize(500, 400)  # Increased height for auto-close checkbox
         self.setStyleSheet(self.get_vs_dark_dialog_stylesheet())
         
         # Main layout
@@ -101,6 +101,13 @@ class AddEditDialog(QDialog):
         self.enabled_check.setObjectName("enabledCheck")
         layout.addWidget(self.enabled_check)
         
+        # Auto-close checkbox (ADDED)
+        self.auto_close_check = ModernCheckBox("Auto-close when simulator stops")
+        self.auto_close_check.setChecked(False)
+        self.auto_close_check.setObjectName("autoCloseCheck")
+        self.auto_close_check.setToolTip("Automatically close this addon when the simulator stops running")
+        layout.addWidget(self.auto_close_check)
+        
         return layout
 
     def create_buttons(self):
@@ -142,11 +149,13 @@ class AddEditDialog(QDialog):
             self.path_edit.setText(file_path)
 
     def get_data(self):
+        # FIXED: Now returns 5 values including auto_close
         return (
             self.name_edit.text().strip(),
             self.path_edit.text().strip(),
             self.args_edit.text().strip(),
-            self.enabled_check.isChecked()
+            self.enabled_check.isChecked(),
+            self.auto_close_check.isChecked()  # ADDED
         )
 
     def get_vs_dark_dialog_stylesheet(self):
@@ -213,33 +222,33 @@ class AddEditDialog(QDialog):
             background-color: #2a2a2a;
         }
         
-        QCheckBox#enabledCheck {
+        QCheckBox#enabledCheck, QCheckBox#autoCloseCheck {
             font-size: 14px;
             color: #cccccc;
             spacing: 8px;
         }
         
-        QCheckBox#enabledCheck::indicator {
+        QCheckBox#enabledCheck::indicator, QCheckBox#autoCloseCheck::indicator {
             width: 18px;
             height: 18px;
         }
         
-        QCheckBox#enabledCheck::indicator:unchecked {
+        QCheckBox#enabledCheck::indicator:unchecked, QCheckBox#autoCloseCheck::indicator:unchecked {
             background-color: #3c3c3c;
             border: 1px solid #555555;
         }
         
-        QCheckBox#enabledCheck::indicator:unchecked:hover {
+        QCheckBox#enabledCheck::indicator:unchecked:hover, QCheckBox#autoCloseCheck::indicator:unchecked:hover {
             border-color: #0e639c;
         }
         
-        QCheckBox#enabledCheck::indicator:checked {
+        QCheckBox#enabledCheck::indicator:checked, QCheckBox#autoCloseCheck::indicator:checked {
             background-color: #007acc;
             border: 1px solid #007acc;
             image: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTIiIGhlaWdodD0iOSIgdmlld0JveD0iMCAwIDEyIDkiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxwYXRoIGQ9Ik0xMC41IDFMNCAxLjVMMSAzLjUiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+Cjwvc3ZnPgo=);
         }
         
-        QCheckBox#enabledCheck::indicator:checked:hover {
+        QCheckBox#enabledCheck::indicator:checked:hover, QCheckBox#autoCloseCheck::indicator:checked:hover {
             background-color: #1177bb;
             border-color: #1177bb;
         }
