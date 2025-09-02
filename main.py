@@ -1,17 +1,21 @@
 import sys
 import os
+import argparse
 import xml.etree.ElementTree as ET
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, QWidget, 
     QTableWidget, QTableWidgetItem, QPushButton, QComboBox, QLabel,
     QFileDialog, QMessageBox, QAbstractItemView, QInputDialog, QFrame,
-    QHeaderView, QSpacerItem, QSizePolicy, QMenu, QMenuBar, QCheckBox
+    QHeaderView, QSpacerItem, QSizePolicy, QMenu, QMenuBar, QCheckBox,
+    QSystemTrayIcon
 )
-from PySide6.QtCore import Qt, QSize
-from PySide6.QtGui import QFont, QIcon, QPalette, QColor, QAction
+from PySide6.QtCore import Qt, QSize, QTimer
+from PySide6.QtGui import QFont, QIcon, QPalette, QColor, QAction, QCloseEvent
 from exexml import ExeXmlManager
 from views.add_edit_dialog import AddEditDialog
 from process_monitor import ProcessMonitor
+from single_instance import SingleInstanceManager
+from system_tray import SystemTrayManager
 import settings
 from PySide6.QtGui import QIcon
 
@@ -152,8 +156,9 @@ class ModernLabel(QLabel):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, start_hidden=False):
         super().__init__()
+        self.start_hidden = start_hidden
         self.setWindowTitle("MSFS exe.xml Manager")
         self.setMinimumSize(1000, 700)
         self.setWindowIcon(QIcon("icon.ico"))
@@ -170,9 +175,46 @@ class MainWindow(QMainWindow):
         self.process_monitor = ProcessMonitor()
         self.process_monitor.sim_stopped.connect(self.on_simulator_stopped)
         self.process_monitor.addon_started.connect(self.on_addon_started)
-        self.process_monitor.addon_stopped.connect(self.on_addon_stopped)  # Added this line
+        self.process_monitor.addon_stopped.connect(self.on_addon_stopped)
         self.running_addons = {}  # addon_name -> process info
         
+        # System tray
+        self.tray_manager = SystemTrayManager(self)
+        self.tray_manager.show_window_requested.connect(self.show_from_tray)
+        self.tray_manager.exit_requested.connect(self.exit_application)
+        
+        # Track if we're really exiting (not just hiding to tray)
+        self.really_exit = False
+        
+        # Setup UI
+        self.setup_ui()
+        
+        # Initialize
+        self.refresh_presets()
+        
+        # Auto load with detection
+        self.auto_load_exe()
+        
+        # Start process monitoring
+        self.process_monitor.start_monitoring(self.current_version)
+        
+        # Setup system tray if starting hidden or if tray is available
+        if start_hidden or QSystemTrayIcon.isSystemTrayAvailable():
+            self.setup_tray()
+        
+        # Show window if not starting hidden
+        if not start_hidden:
+            self.show()
+        elif self.tray_manager.is_visible():
+            print("Started in background mode - running in system tray")
+            self.tray_manager.show_message(
+                "MSFS exe.xml Manager", 
+                "Application started in background mode",
+                QSystemTrayIcon.Information
+            )
+    
+    def setup_ui(self):
+        """Setup the main UI components"""
         # Create menu bar
         self.create_menu_bar()
 
@@ -200,21 +242,43 @@ class MainWindow(QMainWindow):
         # Status section
         status_layout = self.create_status()
         layout.addLayout(status_layout)
-        
-        # Initialize
-        self.refresh_presets()
-        
-        # Auto load with detection
-        self.auto_load_exe()
-        
-        # Start process monitoring
-        self.process_monitor.start_monitoring(self.current_version)
+    
+    def setup_tray(self):
+        """Setup system tray functionality"""
+        if self.tray_manager.setup_tray():
+            print("System tray initialized")
+        else:
+            print("Failed to initialize system tray")
+            if self.start_hidden:
+                # If we can't use tray and started hidden, show the window
+                self.show()
+    
+    def show_from_tray(self):
+        """Show window from system tray"""
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        print("Window shown from system tray")
+    
+    def exit_application(self):
+        """Exit the application completely"""
+        self.really_exit = True
+        self.close()
 
     def create_menu_bar(self):
         menubar = self.menuBar()
         
         # File menu
         file_menu = menubar.addMenu('File')
+        
+        # Background mode toggle
+        if QSystemTrayIcon.isSystemTrayAvailable():
+            background_action = QAction('Run in Background', self)
+            background_action.setCheckable(True)
+            background_action.setChecked(self.start_hidden)
+            background_action.triggered.connect(self.toggle_background_mode)
+            file_menu.addAction(background_action)
+            file_menu.addSeparator()
         
         # Backup submenu
         backup_menu = file_menu.addMenu('Backups')
@@ -239,12 +303,25 @@ class MainWindow(QMainWindow):
         settings_action = QAction('Settings...', self)
         file_menu.addAction(settings_action)
         
+        file_menu.addSeparator()
+        
+        # Exit
+        exit_action = QAction('Exit', self)
+        exit_action.triggered.connect(self.exit_application)
+        file_menu.addAction(exit_action)
+        
         # Help menu
         help_menu = menubar.addMenu('Help')
         
         about_action = QAction('About...', self)
         about_action.triggered.connect(self.show_about)
         help_menu.addAction(about_action)
+    
+    def toggle_background_mode(self):
+        """Toggle background mode"""
+        # This is just a placeholder - in a real implementation you might
+        # save this preference and use it on next startup
+        pass
 
     def create_header(self):
         layout = QVBoxLayout()
@@ -431,9 +508,27 @@ class MainWindow(QMainWindow):
         else:
             self.install_type_label.setText("")
 
-    # -------------------------
-    # Auto-detection methods
-    # -------------------------
+    # Override closeEvent to handle minimize to tray
+    def closeEvent(self, event: QCloseEvent):
+        if not self.really_exit and self.tray_manager.is_visible():
+            # Hide to tray instead of closing
+            event.ignore()
+            self.hide()
+            if not self.start_hidden:  # Only show message if user manually closed
+                self.tray_manager.show_message(
+                    "MSFS exe.xml Manager",
+                    "Application minimized to tray. Double-click the tray icon to restore.",
+                    QSystemTrayIcon.Information
+                )
+        else:
+            # Really exiting
+            self.process_monitor.stop_monitoring()
+            self.tray_manager.hide()
+            event.accept()
+
+    # All the other methods remain the same as in the previous version...
+    # (I'll include the key ones here for completeness)
+    
     def auto_load_exe(self):
         """Try to auto-load exe.xml on startup"""
         s = settings.load_settings()
@@ -617,6 +712,7 @@ class MainWindow(QMainWindow):
             f"<li>Auto-detection for Steam and MS Store versions</li>"
             f"<li>Automatic backups for safety</li>"
             f"<li>Auto-close addons when simulator stops</li>"
+            f"<li>Background operation with system tray</li>"
             f"<li>Preset management</li>"
             f"<li>Support for MSFS2020 and MSFS2024</li>"
             f"</ul>"
@@ -699,6 +795,14 @@ class MainWindow(QMainWindow):
             # Determine installation type and update status
             install_type = settings.get_installation_type(path)
             self.update_status(f"Loaded {os.path.basename(path)} ({install_type})")
+            
+            # Show tray notification if running in background
+            if self.tray_manager.is_visible() and self.isHidden():
+                self.tray_manager.show_message(
+                    "File Loaded",
+                    f"Loaded {os.path.basename(path)} ({install_type})",
+                    QSystemTrayIcon.Information
+                )
             
         except Exception as e:
             QMessageBox.critical(self, "Error", str(e))
@@ -902,6 +1006,14 @@ class MainWindow(QMainWindow):
             
             self.update_status(f"Launched {entry.name}")
             
+            # Show tray notification if running in background
+            if self.tray_manager.is_visible() and self.isHidden():
+                self.tray_manager.show_message(
+                    "Addon Launched",
+                    f"Started {entry.name}",
+                    QSystemTrayIcon.Information
+                )
+            
         except Exception as e:
             QMessageBox.critical(self, "Error", str(e))
 
@@ -1051,10 +1163,16 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 print(f"Error closing {addon_name}: {e}")
         
-        if auto_close_count > 0:
-            self.update_status(f"Simulator stopped - Auto-closed {auto_close_count} addon(s)")
-        else:
-            self.update_status(f"Simulator stopped ({sim_name})")
+        status_message = f"Simulator stopped - Auto-closed {auto_close_count} addon(s)" if auto_close_count > 0 else f"Simulator stopped ({sim_name})"
+        self.update_status(status_message)
+        
+        # Show tray notification
+        if self.tray_manager.is_visible() and auto_close_count > 0:
+            self.tray_manager.show_message(
+                "Auto-Close Complete",
+                f"Closed {auto_close_count} addon(s) when simulator stopped",
+                QSystemTrayIcon.Information
+            )
     
     def on_addon_started(self, addon_name, pid):
         """Called when an addon process starts"""
@@ -1074,17 +1192,6 @@ class MainWindow(QMainWindow):
     def on_addon_stopped(self, addon_name, pid):
         """Called when an addon process stops"""
         print(f"Addon process stopped: {addon_name} (PID: {pid})")
-    
-    def closeEvent(self, event):
-        """Handle application closing"""
-        self.process_monitor.stop_monitoring()
-        event.accept()
-
-    def resource_path(relative_path):
-        """ Get absolute path to resource, works for dev and PyInstaller """
-        if hasattr(sys, "_MEIPASS"):
-            return os.path.join(sys._MEIPASS, relative_path)
-        return os.path.join(os.path.abspath("."), relative_path)
 
     def get_vs_dark_stylesheet(self):
         """Visual Studio Dark theme colors"""
@@ -1420,7 +1527,31 @@ class MainWindow(QMainWindow):
         """
 
 
-if __name__ == "__main__":
+def parse_arguments():
+    """Parse command line arguments"""
+    parser = argparse.ArgumentParser(description='MSFS exe.xml Manager')
+    parser.add_argument(
+        '--start-background', 
+        action='store_true',
+        help='Start the application in background mode (system tray)'
+    )
+    parser.add_argument(
+        '--show',
+        action='store_true',
+        help='Show the main window if instance is already running'
+    )
+    parser.add_argument(
+        '--exit',
+        action='store_true',
+        help='Exit any running instance'
+    )
+    
+    return parser.parse_args()
+
+
+def main():
+    args = parse_arguments()
+    
     app = QApplication(sys.argv)
     
     # Set application properties
@@ -1428,6 +1559,53 @@ if __name__ == "__main__":
     app.setApplicationVersion("1.0.0-rc1")
     app.setOrganizationName("Flight Sim Tools")
     
-    window = MainWindow()
-    window.show()
+    # Handle single instance
+    instance_manager = SingleInstanceManager()
+    
+    # Handle command line arguments for running instance
+    if args.exit:
+        if instance_manager.send_shutdown_signal():
+            print("Sent shutdown signal to running instance")
+            sys.exit(0)
+        else:
+            print("No running instance found")
+            sys.exit(1)
+    
+    if args.show:
+        if instance_manager.try_connect_to_existing():
+            print("Showed existing instance")
+            sys.exit(0)
+        else:
+            print("No running instance found, starting new instance...")
+    
+    # Check if another instance is already running
+    if instance_manager.try_connect_to_existing():
+        print("Another instance is already running. Showing existing window...")
+        sys.exit(0)
+    
+    # We are the primary instance
+    if not instance_manager.start_server():
+        print("Failed to start single instance server")
+        sys.exit(1)
+    
+    # Create main window
+    start_hidden = args.start_background or not QSystemTrayIcon.isSystemTrayAvailable()
+    window = MainWindow(start_hidden=start_hidden)
+    
+    # Connect single instance signals
+    instance_manager.show_window_requested.connect(window.show_from_tray)
+    instance_manager.shutdown_requested.connect(window.exit_application)
+    
+    # Cleanup on application exit
+    app.aboutToQuit.connect(instance_manager.cleanup)
+    
+    # Show window if not starting in background
+    if not start_hidden:
+        window.show()
+    
+    # Start event loop
     sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()
