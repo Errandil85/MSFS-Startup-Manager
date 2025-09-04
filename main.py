@@ -377,7 +377,7 @@ class MainWindow(QMainWindow):
         file_label = ModernLabel("File Operations")
         file_label.setObjectName("sectionTitle")
         
-        load_btn = ModernButton("Load exe.xml", "📁", primary=True)
+        load_btn = ModernButton("Load exe.xml", "📂", primary=True)
         load_btn.clicked.connect(self.load_exe)
         
         save_btn = ModernButton("Apply", "✅")
@@ -526,9 +526,6 @@ class MainWindow(QMainWindow):
             self.tray_manager.hide()
             event.accept()
 
-    # All the other methods remain the same as in the previous version...
-    # (I'll include the key ones here for completeness)
-    
     def auto_load_exe(self):
         """Try to auto-load exe.xml on startup"""
         s = settings.load_settings()
@@ -829,6 +826,8 @@ class MainWindow(QMainWindow):
 
     def update_process_monitoring(self):
         """Update process monitoring for all auto-close entries"""
+        print("\n=== Updating Process Monitoring ===")
+        
         # Clear current monitoring
         for addon_name in list(self.running_addons.keys()):
             self.process_monitor.remove_addon_from_monitor(addon_name)
@@ -836,9 +835,20 @@ class MainWindow(QMainWindow):
         
         # Add all auto-close entries to monitoring
         for entry in self.manager.entries:
-            if entry.auto_close and os.path.exists(entry.path):
+            if entry.auto_close and entry.enabled and os.path.exists(entry.path):
                 self.process_monitor.add_addon_to_monitor(entry.name, entry.path)
-                print(f"Monitoring {entry.name} for auto-close")
+                self.running_addons[entry.name] = {
+                    'process': None,
+                    'path': entry.path,
+                    'auto_close': True
+                }
+                print(f"Added to monitoring: {entry.name} -> {entry.path}")
+            elif entry.auto_close and entry.enabled:
+                print(f"WARNING: Auto-close entry path does not exist: {entry.name} -> {entry.path}")
+            elif entry.auto_close and not entry.enabled:
+                print(f"Skipping disabled auto-close entry: {entry.name}")
+        
+        print("=== Process Monitoring Updated ===\n")
 
     # -------------------------
     # Table Handling
@@ -992,29 +1002,44 @@ class MainWindow(QMainWindow):
         index = rows[0].row()
         try:
             entry = self.manager.entries[index]
+            print(f"\n=== Running Entry ===")
+            print(f"Name: {entry.name}")
+            print(f"Path: {entry.path}")
+            print(f"Args: {entry.args}")
+            print(f"Auto-close: {entry.auto_close}")
+            
             process = self.manager.execute_entry(index)
             
-            if process and entry.auto_close:
-                # Track this process for auto-closing
-                self.process_monitor.add_addon_to_monitor(entry.name, entry.path)
-                self.running_addons[entry.name] = {
-                    'process': process,
-                    'path': entry.path,
-                    'auto_close': True
-                }
-                print(f"Started monitoring {entry.name} for auto-close (PID: {process.pid})")
-            
-            self.update_status(f"Launched {entry.name}")
-            
-            # Show tray notification if running in background
-            if self.tray_manager.is_visible() and self.isHidden():
-                self.tray_manager.show_message(
-                    "Addon Launched",
-                    f"Started {entry.name}",
-                    QSystemTrayIcon.Information
-                )
+            if process:
+                print(f"Process started with PID: {process.pid}")
+                
+                if entry.auto_close:
+                    # Track this process for auto-closing
+                    self.process_monitor.add_addon_to_monitor(entry.name, entry.path)
+                    self.running_addons[entry.name] = {
+                        'process': process,
+                        'path': entry.path,
+                        'auto_close': True
+                    }
+                    print(f"Added to auto-close monitoring: {entry.name} (PID: {process.pid})")
+                
+                self.update_status(f"Launched {entry.name}")
+                
+                # Show tray notification if running in background
+                if self.tray_manager.is_visible() and self.isHidden():
+                    self.tray_manager.show_message(
+                        "Addon Launched",
+                        f"Started {entry.name}",
+                        QSystemTrayIcon.Information
+                    )
+            else:
+                print("Failed to start process")
+                self.update_status(f"Failed to launch {entry.name}")
+                
+            print("=== End Running Entry ===\n")
             
         except Exception as e:
+            print(f"Error running entry: {e}")
             QMessageBox.critical(self, "Error", str(e))
 
     def modify_entry(self):
@@ -1127,52 +1152,72 @@ class MainWindow(QMainWindow):
     # -------------------------
     def on_simulator_stopped(self, sim_name):
         """Called when the simulator process stops"""
-        auto_close_count = 0
-        addons_to_close = []
+        print(f"\n=== Simulator Stopped Event ===")
+        print(f"Simulator: {sim_name}")
         
-        print(f"Simulator stopped: {sim_name}")
+        # Debug current state
+        self.process_monitor.debug_status()
         
         # Find all entries that should be auto-closed
+        auto_close_entries = []
         for entry in self.manager.entries:
-            if entry.auto_close and entry.name in self.running_addons:
-                addons_to_close.append(entry.name)
+            if entry.auto_close and entry.enabled:
+                auto_close_entries.append(entry)
+                print(f"Auto-close entry found: {entry.name} -> {entry.path}")
         
-        # Also check for any running addon processes that should be auto-closed
-        for addon_name in self.process_monitor.get_running_addons():
-            # Find the entry for this addon
-            for entry in self.manager.entries:
-                if entry.name == addon_name and entry.auto_close:
-                    if addon_name not in addons_to_close:
-                        addons_to_close.append(addon_name)
-                    break
+        if not auto_close_entries:
+            print("No auto-close entries found")
+            self.update_status(f"Simulator stopped ({sim_name}) - No auto-close addons")
+            return
         
-        print(f"Addons to auto-close: {addons_to_close}")
+        # Terminate all addon processes that should auto-close
+        total_terminated = 0
         
-        for addon_name in addons_to_close:
-            try:
-                terminated = self.process_monitor.terminate_addon_processes(addon_name)
-                if terminated > 0:
-                    auto_close_count += terminated
-                    print(f"Auto-closed {terminated} process(es) for {addon_name}")
-                
-                # Remove from tracking
-                if addon_name in self.running_addons:
-                    del self.running_addons[addon_name]
-                self.process_monitor.remove_addon_from_monitor(addon_name)
-                
-            except Exception as e:
-                print(f"Error closing {addon_name}: {e}")
+        for entry in auto_close_entries:
+            addon_name = entry.name
+            process_count = self.process_monitor.get_addon_process_count(addon_name)
+            print(f"Checking {addon_name}: {process_count} running processes")
+            
+            if process_count > 0:
+                try:
+                    terminated = self.process_monitor.terminate_addon_processes(addon_name)
+                    total_terminated += terminated
+                    print(f"Terminated {terminated} process(es) for {addon_name}")
+                except Exception as e:
+                    print(f"Error terminating {addon_name}: {e}")
         
-        status_message = f"Simulator stopped - Auto-closed {auto_close_count} addon(s)" if auto_close_count > 0 else f"Simulator stopped ({sim_name})"
+        # Also try to terminate any other running addon processes
+        additional_terminated = self.process_monitor.terminate_all_addon_processes()
+        if additional_terminated > total_terminated:
+            print(f"Terminated {additional_terminated - total_terminated} additional processes")
+            total_terminated = additional_terminated
+        
+        # Update status
+        if total_terminated > 0:
+            status_message = f"Simulator stopped - Auto-closed {total_terminated} addon(s)"
+            print(f"SUCCESS: {status_message}")
+        else:
+            status_message = f"Simulator stopped ({sim_name}) - No addons to close"
+            print(f"NO ACTION: {status_message}")
+        
         self.update_status(status_message)
         
-        # Show tray notification
-        if self.tray_manager.is_visible() and auto_close_count > 0:
-            self.tray_manager.show_message(
-                "Auto-Close Complete",
-                f"Closed {auto_close_count} addon(s) when simulator stopped",
-                QSystemTrayIcon.Information
-            )
+        # Show tray notification if running in background
+        if self.tray_manager.is_visible():
+            if total_terminated > 0:
+                self.tray_manager.show_message(
+                    "Auto-Close Complete",
+                    f"Closed {total_terminated} addon(s) when {sim_name} stopped",
+                    QSystemTrayIcon.Information
+                )
+            else:
+                self.tray_manager.show_message(
+                    "Simulator Stopped",
+                    f"{sim_name} stopped (no addons to close)",
+                    QSystemTrayIcon.Information
+                )
+        
+        print("=== End Simulator Stopped Event ===\n")
     
     def on_addon_started(self, addon_name, pid):
         """Called when an addon process starts"""
@@ -1192,6 +1237,30 @@ class MainWindow(QMainWindow):
     def on_addon_stopped(self, addon_name, pid):
         """Called when an addon process stops"""
         print(f"Addon process stopped: {addon_name} (PID: {pid})")
+
+    def debug_auto_close_status(self):
+        """Debug method to check auto-close status"""
+        print("\n=== Debug Auto-Close Status ===")
+        print(f"Process monitor active: {self.process_monitor.monitoring}")
+        print(f"Simulator running: {self.process_monitor.is_simulator_running()}")
+        
+        print("Auto-close entries:")
+        for i, entry in enumerate(self.manager.entries):
+            if entry.auto_close:
+                exists = os.path.exists(entry.path)
+                process_count = self.process_monitor.get_addon_process_count(entry.name)
+                print(f"  {i}: {entry.name}")
+                print(f"      Path: {entry.path}")
+                print(f"      Enabled: {entry.enabled}")
+                print(f"      Path exists: {exists}")
+                print(f"      Running processes: {process_count}")
+        
+        print("Tracked addons:")
+        for name, info in self.running_addons.items():
+            print(f"  {name}: {info}")
+        
+        self.process_monitor.debug_status()
+        print("=== End Debug ===\n")
 
     def get_vs_dark_stylesheet(self):
         """Visual Studio Dark theme colors"""
@@ -1605,177 +1674,6 @@ def main():
     
     # Start event loop
     sys.exit(app.exec())
-
-    def on_simulator_stopped(self, sim_name):
-        """Called when the simulator process stops"""
-        print(f"\n=== Simulator Stopped Event ===")
-        print(f"Simulator: {sim_name}")
-        
-        # Debug current state
-        self.process_monitor.debug_status()
-        
-        # Find all entries that should be auto-closed
-        auto_close_entries = []
-        for entry in self.manager.entries:
-            if entry.auto_close and entry.enabled:
-                auto_close_entries.append(entry)
-                print(f"Auto-close entry found: {entry.name} -> {entry.path}")
-        
-        if not auto_close_entries:
-            print("No auto-close entries found")
-            self.update_status(f"Simulator stopped ({sim_name}) - No auto-close addons")
-            return
-        
-        # Terminate all addon processes that should auto-close
-        total_terminated = 0
-        
-        for entry in auto_close_entries:
-            addon_name = entry.name
-            process_count = self.process_monitor.get_addon_process_count(addon_name)
-            print(f"Checking {addon_name}: {process_count} running processes")
-            
-            if process_count > 0:
-                try:
-                    terminated = self.process_monitor.terminate_addon_processes(addon_name)
-                    total_terminated += terminated
-                    print(f"Terminated {terminated} process(es) for {addon_name}")
-                except Exception as e:
-                    print(f"Error terminating {addon_name}: {e}")
-        
-        # Also try to terminate any other running addon processes
-        additional_terminated = self.process_monitor.terminate_all_addon_processes()
-        if additional_terminated > total_terminated:
-            print(f"Terminated {additional_terminated - total_terminated} additional processes")
-            total_terminated = additional_terminated
-        
-        # Update status
-        if total_terminated > 0:
-            status_message = f"Simulator stopped - Auto-closed {total_terminated} addon(s)"
-            print(f"SUCCESS: {status_message}")
-        else:
-            status_message = f"Simulator stopped ({sim_name}) - No addons to close"
-            print(f"NO ACTION: {status_message}")
-        
-        self.update_status(status_message)
-        
-        # Show tray notification if running in background
-        if self.tray_manager.is_visible():
-            if total_terminated > 0:
-                self.tray_manager.show_message(
-                    "Auto-Close Complete",
-                    f"Closed {total_terminated} addon(s) when {sim_name} stopped",
-                    QSystemTrayIcon.Information
-                )
-            else:
-                self.tray_manager.show_message(
-                    "Simulator Stopped",
-                    f"{sim_name} stopped (no addons to close)",
-                    QSystemTrayIcon.Information
-                )
-        
-        print("=== End Simulator Stopped Event ===\n")
-
-    def update_process_monitoring(self):
-        """Update process monitoring for all auto-close entries"""
-        print("\n=== Updating Process Monitoring ===")
-        
-        # Clear current monitoring
-        for addon_name in list(self.running_addons.keys()):
-            self.process_monitor.remove_addon_from_monitor(addon_name)
-        self.running_addons.clear()
-        
-        # Add all auto-close entries to monitoring
-        for entry in self.manager.entries:
-            if entry.auto_close and entry.enabled and os.path.exists(entry.path):
-                self.process_monitor.add_addon_to_monitor(entry.name, entry.path)
-                self.running_addons[entry.name] = {
-                    'process': None,
-                    'path': entry.path,
-                    'auto_close': True
-                }
-                print(f"Added to monitoring: {entry.name} -> {entry.path}")
-            elif entry.auto_close and entry.enabled:
-                print(f"WARNING: Auto-close entry path does not exist: {entry.name} -> {entry.path}")
-            elif entry.auto_close and not entry.enabled:
-                print(f"Skipping disabled auto-close entry: {entry.name}")
-        
-        print("=== Process Monitoring Updated ===\n")
-
-    def run_entry(self):
-        rows = self.table.selectionModel().selectedRows()
-        if not rows:
-            QMessageBox.information(self, "No Selection", "Please select an entry to run.")
-            return
-        
-        index = rows[0].row()
-        try:
-            entry = self.manager.entries[index]
-            print(f"\n=== Running Entry ===")
-            print(f"Name: {entry.name}")
-            print(f"Path: {entry.path}")
-            print(f"Args: {entry.args}")
-            print(f"Auto-close: {entry.auto_close}")
-            
-            process = self.manager.execute_entry(index)
-            
-            if process:
-                print(f"Process started with PID: {process.pid}")
-                
-                if entry.auto_close:
-                    # Track this process for auto-closing
-                    self.process_monitor.add_addon_to_monitor(entry.name, entry.path)
-                    self.running_addons[entry.name] = {
-                        'process': process,
-                        'path': entry.path,
-                        'auto_close': True
-                    }
-                    print(f"Added to auto-close monitoring: {entry.name} (PID: {process.pid})")
-                
-                self.update_status(f"Launched {entry.name}")
-                
-                # Show tray notification if running in background
-                if self.tray_manager.is_visible() and self.isHidden():
-                    self.tray_manager.show_message(
-                        "Addon Launched",
-                        f"Started {entry.name}",
-                        QSystemTrayIcon.Information
-                    )
-            else:
-                print("Failed to start process")
-                self.update_status(f"Failed to launch {entry.name}")
-                
-            print("=== End Running Entry ===\n")
-            
-        except Exception as e:
-            print(f"Error running entry: {e}")
-            QMessageBox.critical(self, "Error", str(e))
-
-    # Also add this debug method for troubleshooting
-    def debug_auto_close_status(self):
-        """Debug method to check auto-close status"""
-        print("\n=== Debug Auto-Close Status ===")
-        print(f"Process monitor active: {self.process_monitor.monitoring}")
-        print(f"Simulator running: {self.process_monitor.is_simulator_running()}")
-        
-        print("Auto-close entries:")
-        for i, entry in enumerate(self.manager.entries):
-            if entry.auto_close:
-                exists = os.path.exists(entry.path)
-                process_count = self.process_monitor.get_addon_process_count(entry.name)
-                print(f"  {i}: {entry.name}")
-                print(f"      Path: {entry.path}")
-                print(f"      Enabled: {entry.enabled}")
-                print(f"      Path exists: {exists}")
-                print(f"      Running processes: {process_count}")
-        
-        print("Tracked addons:")
-        for name, info in self.running_addons.items():
-            print(f"  {name}: {info}")
-        
-        self.process_monitor.debug_status()
-        print("=== End Debug ===\n")
-
-    # You can call this debug method from a menu item or button for troubleshooting
 
 
 if __name__ == "__main__":
