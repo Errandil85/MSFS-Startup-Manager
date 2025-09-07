@@ -423,11 +423,16 @@ class MainWindow(QMainWindow):
         
         save_btn = ModernButton("Apply", "✅")
         save_btn.clicked.connect(self.save_exe)
+
+        quit_btn = ModernButton("Quit", "❌")
+        quit_btn.clicked.connect(self.exit_application)
+        quit_btn.setToolTip("Exit the application completely")
         
         file_layout.addWidget(file_label)
         file_layout.addStretch()
         file_layout.addWidget(load_btn)
         file_layout.addWidget(save_btn)
+        file_layout.addWidget(quit_btn)
         
         layout.addLayout(file_layout)
         
@@ -449,6 +454,11 @@ class MainWindow(QMainWindow):
         
         run_btn = ModernButton("Run", "▶️")
         run_btn.clicked.connect(self.run_entry)
+
+        add_self_btn = ModernButton("Add Self to Startup", "⚡")
+        add_self_btn.clicked.connect(self.add_self_to_startup)
+        add_self_btn.setToolTip("Add this application to exe.xml to start automatically with the simulator")
+
         
         entry_layout.addWidget(entry_label)
         entry_layout.addStretch()
@@ -456,6 +466,7 @@ class MainWindow(QMainWindow):
         entry_layout.addWidget(modify_btn)
         entry_layout.addWidget(remove_btn)
         entry_layout.addWidget(run_btn)
+        entry_layout.addWidget(add_self_btn)
         
         layout.addLayout(entry_layout)
         
@@ -474,12 +485,17 @@ class MainWindow(QMainWindow):
         
         save_preset_btn = ModernButton("Save", "💾")
         save_preset_btn.clicked.connect(self.save_preset)
-        
+
+        update_preset_btn = ModernButton("Update Current", "🔄")
+        update_preset_btn.clicked.connect(self.update_current_preset)
+        update_preset_btn.setToolTip("Save changes to the currently selected preset")
+                
         preset_layout.addWidget(preset_label)
         preset_layout.addWidget(self.preset_combo)
         preset_layout.addStretch()
         preset_layout.addWidget(load_preset_btn)
         preset_layout.addWidget(save_preset_btn)
+        preset_layout.addWidget(update_preset_btn)
         
         layout.addLayout(preset_layout)
         
@@ -1398,6 +1414,120 @@ class MainWindow(QMainWindow):
         
         self.process_monitor.debug_status()
         print("=== End Debug ===\n")
+
+    def add_self_to_startup(self):
+        """Add this application to exe.xml for automatic startup with simulator"""
+        if not self.manager.filepath:
+            QMessageBox.information(self, "No File Loaded", "Please load an exe.xml file first.")
+            return
+        
+        try:
+            import sys
+            
+            # Get the current executable path
+            if getattr(sys, 'frozen', False):
+                # Running as compiled executable
+                app_path = sys.executable
+            else:
+                # Running as Python script - use python.exe with script path
+                python_exe = sys.executable
+                script_path = os.path.abspath(__file__)
+                app_path = f'"{python_exe}" "{script_path}"'
+            
+            # Check if entry already exists
+            for entry in self.manager.entries:
+                if "exe.xml Manager" in entry.name and "background" in entry.args.lower():
+                    reply = QMessageBox.question(
+                        self,
+                        "Entry Exists",
+                        "An exe.xml Manager background entry already exists. Replace it?",
+                        QMessageBox.Yes | QMessageBox.No
+                    )
+                    if reply == QMessageBox.Yes:
+                        # Remove existing entry
+                        index = self.manager.entries.index(entry)
+                        self.manager.remove_entry(index)
+                    else:
+                        return
+            
+            # Create backup before first modification if needed
+            if settings.is_first_time_using_file(self.manager.filepath, self.current_version):
+                backup_created, backup_path, error = settings.auto_backup_if_needed(self.manager.filepath, self.current_version)
+                if backup_created:
+                    self.update_status(f"Backup created: {os.path.basename(backup_path)}")
+            
+            # Add the entry
+            entry_name = f"MSFS exe.xml Manager (Background)"
+            args = "--start-background --auto-quit-after-autoclose"
+            
+            self.manager.add_entry(
+                name=entry_name,
+                path=app_path if getattr(sys, 'frozen', False) else python_exe,
+                args=args if getattr(sys, 'frozen', False) else f'{args}',
+                enabled=True,
+                auto_close=False  # Don't auto-close the manager itself
+            )
+            
+            self.populate_table()
+            self.update_status("Added exe.xml Manager to startup")
+            
+            QMessageBox.information(
+                self,
+                "Added to Startup",
+                f"Successfully added '{entry_name}' to exe.xml!\n\n"
+                "This will start the exe.xml Manager in background mode when the simulator starts. "
+                "The background instance will automatically close your addons when the simulator stops, "
+                "then exit itself.\n\n"
+                "Remember to save the exe.xml file to apply changes."
+            )
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to add startup entry: {str(e)}")
+
+    def update_current_preset(self):
+        """Update the currently selected preset with current entries"""
+        current_preset = self.preset_combo.currentText()
+        
+        if not current_preset or current_preset == "No presets available":
+            QMessageBox.information(
+                self, 
+                "No Preset Selected", 
+                "Please select a preset from the dropdown to update."
+            )
+            return
+        
+        if not self.manager.entries:
+            QMessageBox.information(
+                self,
+                "No Entries",
+                "There are no entries to save to the preset."
+            )
+            return
+        
+        reply = QMessageBox.question(
+            self,
+            "Update Preset",
+            f"Are you sure you want to update the preset '{current_preset}' with the current entries?\n\nThis will overwrite the existing preset.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            try:
+                preset_dir = settings.get_preset_dir(self.current_version)
+                preset_path = os.path.join(preset_dir, current_preset + ".json")
+                
+                self.manager.save_preset(preset_path)
+                self.update_status(f"Updated preset: {current_preset}")
+                
+                QMessageBox.information(
+                    self,
+                    "Preset Updated",
+                    f"Successfully updated preset '{current_preset}' with current entries."
+                )
+                
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to update preset: {str(e)}")
 
     def get_vs_dark_stylesheet(self):
         """Visual Studio Dark theme colors"""
