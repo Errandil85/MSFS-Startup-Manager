@@ -156,9 +156,10 @@ class ModernLabel(QLabel):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, start_hidden=False):
+    def __init__(self, start_hidden=False, auto_quit_after_autoclose=False):
         super().__init__()
         self.start_hidden = start_hidden
+        self.auto_quit_after_autoclose = auto_quit_after_autoclose  # New parameter
         self.setWindowTitle("MSFS exe.xml Manager")
         self.setMinimumSize(1000, 700)
         self.setWindowIcon(QIcon("icon.ico"))
@@ -186,6 +187,9 @@ class MainWindow(QMainWindow):
         # Track if we're really exiting (not just hiding to tray)
         self.really_exit = False
         
+        # Track active timers for cleanup
+        self.active_timers = []
+        
         # Setup UI
         self.setup_ui()
         
@@ -207,6 +211,8 @@ class MainWindow(QMainWindow):
             self.show()
         elif self.tray_manager.is_visible():
             print("Started in background mode - running in system tray")
+            if self.auto_quit_after_autoclose:
+                print("Auto-quit after autoclose is enabled")
             self.tray_manager.show_message(
                 "MSFS exe.xml Manager", 
                 "Application started in background mode",
@@ -260,10 +266,45 @@ class MainWindow(QMainWindow):
         self.activateWindow()
         print("Window shown from system tray")
     
+    def force_complete_shutdown(self):
+        """Force immediate shutdown for auto-quit mode"""
+        print("\n=== Force Complete Shutdown ===")
+        
+        try:
+            # Stop all timers first
+            self.stop_all_timers()
+            
+            # Stop process monitoring immediately
+            if hasattr(self, 'process_monitor'):
+                self.process_monitor.stop_monitoring()
+            
+            # Hide tray immediately
+            if hasattr(self, 'tray_manager'):
+                self.tray_manager.hide()
+            
+            # Set exit flag
+            self.really_exit = True
+            
+            # Force quit the application
+            QApplication.quit()
+            
+        except Exception as e:
+            print(f"Error during force shutdown: {e}")
+            # Force exit regardless of errors
+            import os
+            os._exit(0)
+        
+        print("=== Force Complete Shutdown Complete ===\n")
+    
     def exit_application(self):
         """Exit the application completely"""
-        self.really_exit = True
-        self.close()
+        if hasattr(self, 'auto_quit_after_autoclose') and self.auto_quit_after_autoclose:
+            # If auto-quit mode, do immediate shutdown
+            self.force_complete_shutdown()
+        else:
+            # Normal exit
+            self.really_exit = True
+            self.close()
 
     def create_menu_bar(self):
         menubar = self.menuBar()
@@ -508,10 +549,23 @@ class MainWindow(QMainWindow):
         else:
             self.install_type_label.setText("")
 
+    def stop_all_timers(self):
+        """Stop all QTimer instances"""
+        try:
+            for timer in self.active_timers:
+                if timer.isActive():
+                    timer.stop()
+            self.active_timers.clear()
+            
+            # Process any remaining events
+            QApplication.processEvents()
+        except Exception as e:
+            print(f"Error stopping timers: {e}")
+
     # Override closeEvent to handle minimize to tray
     def closeEvent(self, event: QCloseEvent):
-        if not self.really_exit and self.tray_manager.is_visible():
-            # Hide to tray instead of closing
+        if not self.really_exit and self.tray_manager.is_visible() and not (hasattr(self, 'auto_quit_after_autoclose') and self.auto_quit_after_autoclose):
+            # Hide to tray instead of closing (but not in auto-quit mode)
             event.ignore()
             self.hide()
             if not self.start_hidden:  # Only show message if user manually closed
@@ -521,9 +575,20 @@ class MainWindow(QMainWindow):
                     QSystemTrayIcon.Information
                 )
         else:
-            # Really exiting
-            self.process_monitor.stop_monitoring()
-            self.tray_manager.hide()
+            # Really exiting or in auto-quit mode
+            print("Application closing - performing cleanup...")
+            
+            # Stop all timers
+            self.stop_all_timers()
+            
+            # Stop process monitoring
+            if hasattr(self, 'process_monitor'):
+                self.process_monitor.stop_monitoring()
+            
+            # Hide tray
+            if hasattr(self, 'tray_manager'):
+                self.tray_manager.hide()
+            
             event.accept()
 
     def auto_load_exe(self):
@@ -702,7 +767,7 @@ class MainWindow(QMainWindow):
         QMessageBox.about(
             self,
             "About MSFS exe.xml Manager",
-            f"<h3>MSFS exe.xml Manager v1.0.0-rc1</h3>"
+            f"<h3>MSFS exe.xml Manager v1.0.0-rc3</h3>"
             f"<p>A modern tool for managing Microsoft Flight Simulator addons.</p>"
             f"<p><b>Features:</b></p>"
             f"<ul>"
@@ -1154,6 +1219,8 @@ class MainWindow(QMainWindow):
         """Called when the simulator process stops"""
         print(f"\n=== Simulator Stopped Event ===")
         print(f"Simulator: {sim_name}")
+        print(f"Auto-quit after autoclose: {self.auto_quit_after_autoclose}")
+        print(f"Running in background: {self.start_hidden}")
         
         # Debug current state
         self.process_monitor.debug_status()
@@ -1168,6 +1235,16 @@ class MainWindow(QMainWindow):
         if not auto_close_entries:
             print("No auto-close entries found")
             self.update_status(f"Simulator stopped ({sim_name}) - No auto-close addons")
+            
+            # If no auto-close entries but auto-quit is enabled and running in background, quit
+            if self.auto_quit_after_autoclose and self.start_hidden:
+                print("No auto-close entries, but auto-quit enabled - exiting application")
+                timer = QTimer()
+                timer.setSingleShot(True)
+                timer.timeout.connect(self.exit_application)
+                timer.start(2000)  # Delay 2 seconds for user to see message
+                self.active_timers.append(timer)
+            
             return
         
         # Terminate all addon processes that should auto-close
@@ -1205,9 +1282,16 @@ class MainWindow(QMainWindow):
         # Show tray notification if running in background
         if self.tray_manager.is_visible():
             if total_terminated > 0:
+                notification_title = "Auto-Close Complete"
+                notification_message = f"Closed {total_terminated} addon(s) when {sim_name} stopped"
+                
+                # Add auto-quit information to notification if enabled
+                if self.auto_quit_after_autoclose and self.start_hidden:
+                    notification_message += " - Application will exit in 5 seconds"
+                    
                 self.tray_manager.show_message(
-                    "Auto-Close Complete",
-                    f"Closed {total_terminated} addon(s) when {sim_name} stopped",
+                    notification_title,
+                    notification_message,
                     QSystemTrayIcon.Information
                 )
             else:
@@ -1217,7 +1301,60 @@ class MainWindow(QMainWindow):
                     QSystemTrayIcon.Information
                 )
         
+        # Auto-quit functionality - only if running in background mode and auto-quit is enabled
+        if self.auto_quit_after_autoclose and self.start_hidden:
+            print("Auto-quit after autoclose is enabled - scheduling application exit")
+            
+            # Wait a few seconds to allow user to see the notification and for processes to fully terminate
+            timer = QTimer()
+            timer.setSingleShot(True)
+            timer.timeout.connect(self.delayed_auto_quit)
+            timer.start(5000)  # 5 second delay
+            self.active_timers.append(timer)
+        
         print("=== End Simulator Stopped Event ===\n")
+    
+    def delayed_auto_quit(self):
+        """Perform delayed auto-quit after auto-close operations"""
+        print("\n=== Delayed Auto-Quit ===")
+        
+        # Double-check that no auto-close processes are still running
+        remaining_processes = 0
+        for entry in self.manager.entries:
+            if entry.auto_close and entry.enabled:
+                count = self.process_monitor.get_addon_process_count(entry.name)
+                remaining_processes += count
+                if count > 0:
+                    print(f"Warning: {entry.name} still has {count} running processes")
+        
+        if remaining_processes > 0:
+            print(f"Warning: {remaining_processes} auto-close processes still running, extending delay...")
+            # Try again in 3 more seconds
+            timer = QTimer()
+            timer.setSingleShot(True)
+            timer.timeout.connect(self.delayed_auto_quit)
+            timer.start(3000)
+            self.active_timers.append(timer)
+            return
+        
+        print("All auto-close processes terminated, exiting application...")
+        
+        # Show final tray notification
+        if self.tray_manager.is_visible():
+            self.tray_manager.show_message(
+                "Auto-Exit",
+                "All auto-close operations complete - Application exiting",
+                QSystemTrayIcon.Information,
+                timeout=1000  # Short timeout since we're exiting
+            )
+        
+        # Exit after a brief moment to show the notification
+        timer = QTimer()
+        timer.setSingleShot(True)
+        timer.timeout.connect(self.exit_application)
+        timer.start(1000)
+        self.active_timers.append(timer)
+        print("=== End Delayed Auto-Quit ===\n")
     
     def on_addon_started(self, addon_name, pid):
         """Called when an addon process starts"""
@@ -1605,6 +1742,11 @@ def parse_arguments():
         help='Start the application in background mode (system tray)'
     )
     parser.add_argument(
+        '--auto-quit-after-autoclose',
+        action='store_true',
+        help='Automatically quit the application after all auto-close operations complete (requires --start-background)'
+    )
+    parser.add_argument(
         '--show',
         action='store_true',
         help='Show the main window if instance is already running'
@@ -1621,11 +1763,16 @@ def parse_arguments():
 def main():
     args = parse_arguments()
     
+    # Validate argument combinations
+    if args.auto_quit_after_autoclose and not args.start_background:
+        print("Warning: --auto-quit-after-autoclose requires --start-background, enabling background mode")
+        args.start_background = True
+    
     app = QApplication(sys.argv)
     
     # Set application properties
     app.setApplicationName("MSFS exe.xml Manager")
-    app.setApplicationVersion("1.0.0-rc1")
+    app.setApplicationVersion("1.0.0-rc3")
     app.setOrganizationName("Flight Sim Tools")
     
     # Handle single instance
@@ -1657,23 +1804,49 @@ def main():
         print("Failed to start single instance server")
         sys.exit(1)
     
-    # Create main window
+    # Create main window with auto-quit option
     start_hidden = args.start_background or not QSystemTrayIcon.isSystemTrayAvailable()
-    window = MainWindow(start_hidden=start_hidden)
+    window = MainWindow(
+        start_hidden=start_hidden,
+        auto_quit_after_autoclose=args.auto_quit_after_autoclose
+    )
     
     # Connect single instance signals
     instance_manager.show_window_requested.connect(window.show_from_tray)
     instance_manager.shutdown_requested.connect(window.exit_application)
     
     # Cleanup on application exit
-    app.aboutToQuit.connect(instance_manager.cleanup)
+    def cleanup_on_exit():
+        print("Application aboutToQuit - final cleanup")
+        try:
+            instance_manager.cleanup()
+            # Force any remaining cleanup
+            if hasattr(window, 'process_monitor'):
+                window.process_monitor.stop_monitoring()
+            if hasattr(window, 'stop_all_timers'):
+                window.stop_all_timers()
+        except Exception as e:
+            print(f"Error during final cleanup: {e}")
+    
+    app.aboutToQuit.connect(cleanup_on_exit)
     
     # Show window if not starting in background
     if not start_hidden:
         window.show()
+    elif args.auto_quit_after_autoclose:
+        print("Started in background mode with auto-quit after autoclose enabled")
     
     # Start event loop
-    sys.exit(app.exec())
+    try:
+        exit_code = app.exec()
+        print(f"Application exec finished with code: {exit_code}")
+        sys.exit(exit_code)
+    except KeyboardInterrupt:
+        print("Keyboard interrupt - forcing exit")
+        sys.exit(1)
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
