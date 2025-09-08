@@ -341,10 +341,10 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
         
         # Settings
-        settings_action = QAction('Settings...', self)
-        file_menu.addAction(settings_action)
+        #settings_action = QAction('Settings...', self)
+        #file_menu.addAction(settings_action)
         
-        file_menu.addSeparator()
+        #file_menu.addSeparator()
         
         # Exit
         exit_action = QAction('Exit', self)
@@ -489,6 +489,10 @@ class MainWindow(QMainWindow):
         update_preset_btn = ModernButton("Update Current", "🔄")
         update_preset_btn.clicked.connect(self.update_current_preset)
         update_preset_btn.setToolTip("Save changes to the currently selected preset")
+
+        delete_preset_btn = ModernButton("Delete", "🗑️")
+        delete_preset_btn.clicked.connect(self.delete_preset)
+        delete_preset_btn.setToolTip("Delete the currently selected preset")
                 
         preset_layout.addWidget(preset_label)
         preset_layout.addWidget(self.preset_combo)
@@ -496,6 +500,7 @@ class MainWindow(QMainWindow):
         preset_layout.addWidget(load_preset_btn)
         preset_layout.addWidget(save_preset_btn)
         preset_layout.addWidget(update_preset_btn)
+        preset_layout.addWidget(delete_preset_btn)
         
         layout.addLayout(preset_layout)
         
@@ -1528,6 +1533,54 @@ class MainWindow(QMainWindow):
                 
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to update preset: {str(e)}")
+
+    def delete_preset(self):
+        """Delete the currently selected preset"""
+        current_preset = self.preset_combo.currentText()
+        
+        if not current_preset or current_preset == "No presets available":
+            QMessageBox.information(
+                self, 
+                "No Preset Selected", 
+                "Please select a preset from the dropdown to delete."
+            )
+            return
+        
+        reply = QMessageBox.question(
+            self,
+            "Delete Preset",
+            f"Are you sure you want to delete the preset '{current_preset}'?\n\nThis action cannot be undone.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            try:
+                preset_dir = settings.get_preset_dir(self.current_version)
+                preset_path = os.path.join(preset_dir, current_preset + ".json")
+                
+                if os.path.exists(preset_path):
+                    os.remove(preset_path)
+                    
+                    # Refresh the combo box
+                    self.refresh_presets()
+                    
+                    self.update_status(f"Deleted preset: {current_preset}")
+                    
+                    QMessageBox.information(
+                        self,
+                        "Preset Deleted",
+                        f"Successfully deleted preset '{current_preset}'."
+                    )
+                else:
+                    QMessageBox.warning(
+                        self,
+                        "Preset Not Found",
+                        f"Preset file '{current_preset}' was not found."
+                    )
+                    
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to delete preset: {str(e)}")
 
     def get_vs_dark_stylesheet(self):
         """Visual Studio Dark theme colors"""
