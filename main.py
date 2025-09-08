@@ -18,6 +18,7 @@ from single_instance import SingleInstanceManager
 from system_tray import SystemTrayManager
 import settings
 from PySide6.QtGui import QIcon
+import json
 
 
 class BackupDialog(QMessageBox):
@@ -156,10 +157,11 @@ class ModernLabel(QLabel):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, start_hidden=False):
+    def __init__(self, start_hidden=False, auto_quit_after_autoclose=False):
         super().__init__()
         self.start_hidden = start_hidden
-        self.setWindowTitle("MSFS exe.xml Manager")
+        self.auto_quit_after_autoclose = auto_quit_after_autoclose  # New parameter
+        self.setWindowTitle("MSFS Startup Manager")
         self.setMinimumSize(1000, 700)
         self.setWindowIcon(QIcon("icon.ico"))
         
@@ -186,6 +188,9 @@ class MainWindow(QMainWindow):
         # Track if we're really exiting (not just hiding to tray)
         self.really_exit = False
         
+        # Track active timers for cleanup
+        self.active_timers = []
+        
         # Setup UI
         self.setup_ui()
         
@@ -207,8 +212,10 @@ class MainWindow(QMainWindow):
             self.show()
         elif self.tray_manager.is_visible():
             print("Started in background mode - running in system tray")
+            if self.auto_quit_after_autoclose:
+                print("Auto-quit after autoclose is enabled")
             self.tray_manager.show_message(
-                "MSFS exe.xml Manager", 
+                "MSFS Startup Manager", 
                 "Application started in background mode",
                 QSystemTrayIcon.Information
             )
@@ -260,10 +267,45 @@ class MainWindow(QMainWindow):
         self.activateWindow()
         print("Window shown from system tray")
     
+    def force_complete_shutdown(self):
+        """Force immediate shutdown for auto-quit mode"""
+        print("\n=== Force Complete Shutdown ===")
+        
+        try:
+            # Stop all timers first
+            self.stop_all_timers()
+            
+            # Stop process monitoring immediately
+            if hasattr(self, 'process_monitor'):
+                self.process_monitor.stop_monitoring()
+            
+            # Hide tray immediately
+            if hasattr(self, 'tray_manager'):
+                self.tray_manager.hide()
+            
+            # Set exit flag
+            self.really_exit = True
+            
+            # Force quit the application
+            QApplication.quit()
+            
+        except Exception as e:
+            print(f"Error during force shutdown: {e}")
+            # Force exit regardless of errors
+            import os
+            os._exit(0)
+        
+        print("=== Force Complete Shutdown Complete ===\n")
+    
     def exit_application(self):
         """Exit the application completely"""
-        self.really_exit = True
-        self.close()
+        if hasattr(self, 'auto_quit_after_autoclose') and self.auto_quit_after_autoclose:
+            # If auto-quit mode, do immediate shutdown
+            self.force_complete_shutdown()
+        else:
+            # Normal exit
+            self.really_exit = True
+            self.close()
 
     def create_menu_bar(self):
         menubar = self.menuBar()
@@ -300,10 +342,10 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
         
         # Settings
-        settings_action = QAction('Settings...', self)
-        file_menu.addAction(settings_action)
+        #settings_action = QAction('Settings...', self)
+        #file_menu.addAction(settings_action)
         
-        file_menu.addSeparator()
+        #file_menu.addSeparator()
         
         # Exit
         exit_action = QAction('Exit', self)
@@ -327,7 +369,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout()
         
         # Title
-        title = ModernLabel("MSFS exe.xml Manager")
+        title = ModernLabel("MSFS Startup Manager")
         title.setObjectName("mainTitle")
         layout.addWidget(title)
         
@@ -377,16 +419,21 @@ class MainWindow(QMainWindow):
         file_label = ModernLabel("File Operations")
         file_label.setObjectName("sectionTitle")
         
-        load_btn = ModernButton("Load exe.xml", "📁", primary=True)
+        load_btn = ModernButton("Load exe.xml", "📂", primary=True)
         load_btn.clicked.connect(self.load_exe)
         
         save_btn = ModernButton("Apply", "✅")
         save_btn.clicked.connect(self.save_exe)
+
+        quit_btn = ModernButton("Quit", "❌")
+        quit_btn.clicked.connect(self.exit_application)
+        quit_btn.setToolTip("Exit the application completely")
         
         file_layout.addWidget(file_label)
         file_layout.addStretch()
         file_layout.addWidget(load_btn)
         file_layout.addWidget(save_btn)
+        file_layout.addWidget(quit_btn)
         
         layout.addLayout(file_layout)
         
@@ -408,6 +455,11 @@ class MainWindow(QMainWindow):
         
         run_btn = ModernButton("Run", "▶️")
         run_btn.clicked.connect(self.run_entry)
+
+        add_self_btn = ModernButton("Add Self to Startup", "⚡")
+        add_self_btn.clicked.connect(self.add_self_to_startup)
+        add_self_btn.setToolTip("Add this application to exe.xml to start automatically with the simulator")
+
         
         entry_layout.addWidget(entry_label)
         entry_layout.addStretch()
@@ -415,6 +467,7 @@ class MainWindow(QMainWindow):
         entry_layout.addWidget(modify_btn)
         entry_layout.addWidget(remove_btn)
         entry_layout.addWidget(run_btn)
+        entry_layout.addWidget(add_self_btn)
         
         layout.addLayout(entry_layout)
         
@@ -433,12 +486,27 @@ class MainWindow(QMainWindow):
         
         save_preset_btn = ModernButton("Save", "💾")
         save_preset_btn.clicked.connect(self.save_preset)
-        
+
+        update_preset_btn = ModernButton("Update Current", "🔄")
+        update_preset_btn.clicked.connect(self.update_current_preset)
+        update_preset_btn.setToolTip("Save changes to the currently selected preset")
+
+        delete_preset_btn = ModernButton("Delete", "🗑️")
+        delete_preset_btn.clicked.connect(self.delete_preset)
+        delete_preset_btn.setToolTip("Delete the currently selected preset")
+
+        duplicate_preset_btn = ModernButton("Duplicate", "📄")
+        duplicate_preset_btn.clicked.connect(self.duplicate_preset)
+        duplicate_preset_btn.setToolTip("Create a copy of the currently selected preset")
+                
         preset_layout.addWidget(preset_label)
         preset_layout.addWidget(self.preset_combo)
         preset_layout.addStretch()
         preset_layout.addWidget(load_preset_btn)
         preset_layout.addWidget(save_preset_btn)
+        preset_layout.addWidget(update_preset_btn)
+        preset_layout.addWidget(delete_preset_btn)
+        preset_layout.addWidget(duplicate_preset_btn)
         
         layout.addLayout(preset_layout)
         
@@ -508,10 +576,23 @@ class MainWindow(QMainWindow):
         else:
             self.install_type_label.setText("")
 
+    def stop_all_timers(self):
+        """Stop all QTimer instances"""
+        try:
+            for timer in self.active_timers:
+                if timer.isActive():
+                    timer.stop()
+            self.active_timers.clear()
+            
+            # Process any remaining events
+            QApplication.processEvents()
+        except Exception as e:
+            print(f"Error stopping timers: {e}")
+
     # Override closeEvent to handle minimize to tray
     def closeEvent(self, event: QCloseEvent):
-        if not self.really_exit and self.tray_manager.is_visible():
-            # Hide to tray instead of closing
+        if not self.really_exit and self.tray_manager.is_visible() and not (hasattr(self, 'auto_quit_after_autoclose') and self.auto_quit_after_autoclose):
+            # Hide to tray instead of closing (but not in auto-quit mode)
             event.ignore()
             self.hide()
             if not self.start_hidden:  # Only show message if user manually closed
@@ -521,14 +602,22 @@ class MainWindow(QMainWindow):
                     QSystemTrayIcon.Information
                 )
         else:
-            # Really exiting
-            self.process_monitor.stop_monitoring()
-            self.tray_manager.hide()
+            # Really exiting or in auto-quit mode
+            print("Application closing - performing cleanup...")
+            
+            # Stop all timers
+            self.stop_all_timers()
+            
+            # Stop process monitoring
+            if hasattr(self, 'process_monitor'):
+                self.process_monitor.stop_monitoring()
+            
+            # Hide tray
+            if hasattr(self, 'tray_manager'):
+                self.tray_manager.hide()
+            
             event.accept()
 
-    # All the other methods remain the same as in the previous version...
-    # (I'll include the key ones here for completeness)
-    
     def auto_load_exe(self):
         """Try to auto-load exe.xml on startup"""
         s = settings.load_settings()
@@ -704,8 +793,8 @@ class MainWindow(QMainWindow):
         """Show about dialog"""
         QMessageBox.about(
             self,
-            "About MSFS exe.xml Manager",
-            f"<h3>MSFS exe.xml Manager v1.0.0-rc1</h3>"
+            "About MSFS Startup Manager",
+            f"<h3>MSFS Startup Manager v1.0.0-rc3</h3>"
             f"<p>A modern tool for managing Microsoft Flight Simulator addons.</p>"
             f"<p><b>Features:</b></p>"
             f"<ul>"
@@ -829,6 +918,8 @@ class MainWindow(QMainWindow):
 
     def update_process_monitoring(self):
         """Update process monitoring for all auto-close entries"""
+        print("\n=== Updating Process Monitoring ===")
+        
         # Clear current monitoring
         for addon_name in list(self.running_addons.keys()):
             self.process_monitor.remove_addon_from_monitor(addon_name)
@@ -836,9 +927,20 @@ class MainWindow(QMainWindow):
         
         # Add all auto-close entries to monitoring
         for entry in self.manager.entries:
-            if entry.auto_close and os.path.exists(entry.path):
+            if entry.auto_close and entry.enabled and os.path.exists(entry.path):
                 self.process_monitor.add_addon_to_monitor(entry.name, entry.path)
-                print(f"Monitoring {entry.name} for auto-close")
+                self.running_addons[entry.name] = {
+                    'process': None,
+                    'path': entry.path,
+                    'auto_close': True
+                }
+                print(f"Added to monitoring: {entry.name} -> {entry.path}")
+            elif entry.auto_close and entry.enabled:
+                print(f"WARNING: Auto-close entry path does not exist: {entry.name} -> {entry.path}")
+            elif entry.auto_close and not entry.enabled:
+                print(f"Skipping disabled auto-close entry: {entry.name}")
+        
+        print("=== Process Monitoring Updated ===\n")
 
     # -------------------------
     # Table Handling
@@ -992,29 +1094,44 @@ class MainWindow(QMainWindow):
         index = rows[0].row()
         try:
             entry = self.manager.entries[index]
+            print(f"\n=== Running Entry ===")
+            print(f"Name: {entry.name}")
+            print(f"Path: {entry.path}")
+            print(f"Args: {entry.args}")
+            print(f"Auto-close: {entry.auto_close}")
+            
             process = self.manager.execute_entry(index)
             
-            if process and entry.auto_close:
-                # Track this process for auto-closing
-                self.process_monitor.add_addon_to_monitor(entry.name, entry.path)
-                self.running_addons[entry.name] = {
-                    'process': process,
-                    'path': entry.path,
-                    'auto_close': True
-                }
-                print(f"Started monitoring {entry.name} for auto-close (PID: {process.pid})")
-            
-            self.update_status(f"Launched {entry.name}")
-            
-            # Show tray notification if running in background
-            if self.tray_manager.is_visible() and self.isHidden():
-                self.tray_manager.show_message(
-                    "Addon Launched",
-                    f"Started {entry.name}",
-                    QSystemTrayIcon.Information
-                )
+            if process:
+                print(f"Process started with PID: {process.pid}")
+                
+                if entry.auto_close:
+                    # Track this process for auto-closing
+                    self.process_monitor.add_addon_to_monitor(entry.name, entry.path)
+                    self.running_addons[entry.name] = {
+                        'process': process,
+                        'path': entry.path,
+                        'auto_close': True
+                    }
+                    print(f"Added to auto-close monitoring: {entry.name} (PID: {process.pid})")
+                
+                self.update_status(f"Launched {entry.name}")
+                
+                # Show tray notification if running in background
+                if self.tray_manager.is_visible() and self.isHidden():
+                    self.tray_manager.show_message(
+                        "Addon Launched",
+                        f"Started {entry.name}",
+                        QSystemTrayIcon.Information
+                    )
+            else:
+                print("Failed to start process")
+                self.update_status(f"Failed to launch {entry.name}")
+                
+            print("=== End Running Entry ===\n")
             
         except Exception as e:
+            print(f"Error running entry: {e}")
             QMessageBox.critical(self, "Error", str(e))
 
     def modify_entry(self):
@@ -1127,52 +1244,144 @@ class MainWindow(QMainWindow):
     # -------------------------
     def on_simulator_stopped(self, sim_name):
         """Called when the simulator process stops"""
-        auto_close_count = 0
-        addons_to_close = []
+        print(f"\n=== Simulator Stopped Event ===")
+        print(f"Simulator: {sim_name}")
+        print(f"Auto-quit after autoclose: {self.auto_quit_after_autoclose}")
+        print(f"Running in background: {self.start_hidden}")
         
-        print(f"Simulator stopped: {sim_name}")
+        # Debug current state
+        self.process_monitor.debug_status()
         
         # Find all entries that should be auto-closed
+        auto_close_entries = []
         for entry in self.manager.entries:
-            if entry.auto_close and entry.name in self.running_addons:
-                addons_to_close.append(entry.name)
+            if entry.auto_close and entry.enabled:
+                auto_close_entries.append(entry)
+                print(f"Auto-close entry found: {entry.name} -> {entry.path}")
         
-        # Also check for any running addon processes that should be auto-closed
-        for addon_name in self.process_monitor.get_running_addons():
-            # Find the entry for this addon
-            for entry in self.manager.entries:
-                if entry.name == addon_name and entry.auto_close:
-                    if addon_name not in addons_to_close:
-                        addons_to_close.append(addon_name)
-                    break
+        if not auto_close_entries:
+            print("No auto-close entries found")
+            self.update_status(f"Simulator stopped ({sim_name}) - No auto-close addons")
+            
+            # If no auto-close entries but auto-quit is enabled and running in background, quit
+            if self.auto_quit_after_autoclose and self.start_hidden:
+                print("No auto-close entries, but auto-quit enabled - exiting application")
+                timer = QTimer()
+                timer.setSingleShot(True)
+                timer.timeout.connect(self.exit_application)
+                timer.start(2000)  # Delay 2 seconds for user to see message
+                self.active_timers.append(timer)
+            
+            return
         
-        print(f"Addons to auto-close: {addons_to_close}")
+        # Terminate all addon processes that should auto-close
+        total_terminated = 0
         
-        for addon_name in addons_to_close:
-            try:
-                terminated = self.process_monitor.terminate_addon_processes(addon_name)
-                if terminated > 0:
-                    auto_close_count += terminated
-                    print(f"Auto-closed {terminated} process(es) for {addon_name}")
-                
-                # Remove from tracking
-                if addon_name in self.running_addons:
-                    del self.running_addons[addon_name]
-                self.process_monitor.remove_addon_from_monitor(addon_name)
-                
-            except Exception as e:
-                print(f"Error closing {addon_name}: {e}")
+        for entry in auto_close_entries:
+            addon_name = entry.name
+            process_count = self.process_monitor.get_addon_process_count(addon_name)
+            print(f"Checking {addon_name}: {process_count} running processes")
+            
+            if process_count > 0:
+                try:
+                    terminated = self.process_monitor.terminate_addon_processes(addon_name)
+                    total_terminated += terminated
+                    print(f"Terminated {terminated} process(es) for {addon_name}")
+                except Exception as e:
+                    print(f"Error terminating {addon_name}: {e}")
         
-        status_message = f"Simulator stopped - Auto-closed {auto_close_count} addon(s)" if auto_close_count > 0 else f"Simulator stopped ({sim_name})"
+        # Also try to terminate any other running addon processes
+        additional_terminated = self.process_monitor.terminate_all_addon_processes()
+        if additional_terminated > total_terminated:
+            print(f"Terminated {additional_terminated - total_terminated} additional processes")
+            total_terminated = additional_terminated
+        
+        # Update status
+        if total_terminated > 0:
+            status_message = f"Simulator stopped - Auto-closed {total_terminated} addon(s)"
+            print(f"SUCCESS: {status_message}")
+        else:
+            status_message = f"Simulator stopped ({sim_name}) - No addons to close"
+            print(f"NO ACTION: {status_message}")
+        
         self.update_status(status_message)
         
-        # Show tray notification
-        if self.tray_manager.is_visible() and auto_close_count > 0:
+        # Show tray notification if running in background
+        if self.tray_manager.is_visible():
+            if total_terminated > 0:
+                notification_title = "Auto-Close Complete"
+                notification_message = f"Closed {total_terminated} addon(s) when {sim_name} stopped"
+                
+                # Add auto-quit information to notification if enabled
+                if self.auto_quit_after_autoclose and self.start_hidden:
+                    notification_message += " - Application will exit in 5 seconds"
+                    
+                self.tray_manager.show_message(
+                    notification_title,
+                    notification_message,
+                    QSystemTrayIcon.Information
+                )
+            else:
+                self.tray_manager.show_message(
+                    "Simulator Stopped",
+                    f"{sim_name} stopped (no addons to close)",
+                    QSystemTrayIcon.Information
+                )
+        
+        # Auto-quit functionality - only if running in background mode and auto-quit is enabled
+        if self.auto_quit_after_autoclose and self.start_hidden:
+            print("Auto-quit after autoclose is enabled - scheduling application exit")
+            
+            # Wait a few seconds to allow user to see the notification and for processes to fully terminate
+            timer = QTimer()
+            timer.setSingleShot(True)
+            timer.timeout.connect(self.delayed_auto_quit)
+            timer.start(5000)  # 5 second delay
+            self.active_timers.append(timer)
+        
+        print("=== End Simulator Stopped Event ===\n")
+    
+    def delayed_auto_quit(self):
+        """Perform delayed auto-quit after auto-close operations"""
+        print("\n=== Delayed Auto-Quit ===")
+        
+        # Double-check that no auto-close processes are still running
+        remaining_processes = 0
+        for entry in self.manager.entries:
+            if entry.auto_close and entry.enabled:
+                count = self.process_monitor.get_addon_process_count(entry.name)
+                remaining_processes += count
+                if count > 0:
+                    print(f"Warning: {entry.name} still has {count} running processes")
+        
+        if remaining_processes > 0:
+            print(f"Warning: {remaining_processes} auto-close processes still running, extending delay...")
+            # Try again in 3 more seconds
+            timer = QTimer()
+            timer.setSingleShot(True)
+            timer.timeout.connect(self.delayed_auto_quit)
+            timer.start(3000)
+            self.active_timers.append(timer)
+            return
+        
+        print("All auto-close processes terminated, exiting application...")
+        
+        # Show final tray notification
+        if self.tray_manager.is_visible():
             self.tray_manager.show_message(
-                "Auto-Close Complete",
-                f"Closed {auto_close_count} addon(s) when simulator stopped",
-                QSystemTrayIcon.Information
+                "Auto-Exit",
+                "All auto-close operations complete - Application exiting",
+                QSystemTrayIcon.Information,
+                timeout=1000  # Short timeout since we're exiting
             )
+        
+        # Exit after a brief moment to show the notification
+        timer = QTimer()
+        timer.setSingleShot(True)
+        timer.timeout.connect(self.exit_application)
+        timer.start(1000)
+        self.active_timers.append(timer)
+        print("=== End Delayed Auto-Quit ===\n")
     
     def on_addon_started(self, addon_name, pid):
         """Called when an addon process starts"""
@@ -1192,6 +1401,274 @@ class MainWindow(QMainWindow):
     def on_addon_stopped(self, addon_name, pid):
         """Called when an addon process stops"""
         print(f"Addon process stopped: {addon_name} (PID: {pid})")
+
+    def debug_auto_close_status(self):
+        """Debug method to check auto-close status"""
+        print("\n=== Debug Auto-Close Status ===")
+        print(f"Process monitor active: {self.process_monitor.monitoring}")
+        print(f"Simulator running: {self.process_monitor.is_simulator_running()}")
+        
+        print("Auto-close entries:")
+        for i, entry in enumerate(self.manager.entries):
+            if entry.auto_close:
+                exists = os.path.exists(entry.path)
+                process_count = self.process_monitor.get_addon_process_count(entry.name)
+                print(f"  {i}: {entry.name}")
+                print(f"      Path: {entry.path}")
+                print(f"      Enabled: {entry.enabled}")
+                print(f"      Path exists: {exists}")
+                print(f"      Running processes: {process_count}")
+        
+        print("Tracked addons:")
+        for name, info in self.running_addons.items():
+            print(f"  {name}: {info}")
+        
+        self.process_monitor.debug_status()
+        print("=== End Debug ===\n")
+
+    def add_self_to_startup(self):
+        """Add this application to exe.xml for automatic startup with simulator"""
+        if not self.manager.filepath:
+            QMessageBox.information(self, "No File Loaded", "Please load an exe.xml file first.")
+            return
+        
+        try:
+            import sys
+            
+            # Get the current executable path
+            if getattr(sys, 'frozen', False):
+                # Running as compiled executable
+                app_path = sys.executable
+            else:
+                # Running as Python script - use python.exe with script path
+                python_exe = sys.executable
+                script_path = os.path.abspath(__file__)
+                app_path = f'"{python_exe}" "{script_path}"'
+            
+            # Check if entry already exists
+            for entry in self.manager.entries:
+                if "Startup Manager" in entry.name and "background" in entry.args.lower():
+                    reply = QMessageBox.question(
+                        self,
+                        "Entry Exists",
+                        "An Startup Manager background entry already exists. Replace it?",
+                        QMessageBox.Yes | QMessageBox.No
+                    )
+                    if reply == QMessageBox.Yes:
+                        # Remove existing entry
+                        index = self.manager.entries.index(entry)
+                        self.manager.remove_entry(index)
+                    else:
+                        return
+            
+            # Create backup before first modification if needed
+            if settings.is_first_time_using_file(self.manager.filepath, self.current_version):
+                backup_created, backup_path, error = settings.auto_backup_if_needed(self.manager.filepath, self.current_version)
+                if backup_created:
+                    self.update_status(f"Backup created: {os.path.basename(backup_path)}")
+            
+            # Add the entry
+            entry_name = f"MSFS Startup Manager (Background)"
+            args = "--start-background --auto-quit-after-autoclose"
+            
+            self.manager.add_entry(
+                name=entry_name,
+                path=app_path if getattr(sys, 'frozen', False) else python_exe,
+                args=args if getattr(sys, 'frozen', False) else f'{args}',
+                enabled=True,
+                auto_close=False  # Don't auto-close the manager itself
+            )
+            
+            self.populate_table()
+            self.update_status("Added exe.xml Manager to startup")
+            
+            QMessageBox.information(
+                self,
+                "Added to Startup",
+                f"Successfully added '{entry_name}' to exe.xml!\n\n"
+                "This will start the exe.xml Manager in background mode when the simulator starts. "
+                "The background instance will automatically close your addons when the simulator stops, "
+                "then exit itself.\n\n"
+                "Remember to save the exe.xml file to apply changes."
+            )
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to add startup entry: {str(e)}")
+
+    def update_current_preset(self):
+        """Update the currently selected preset with current entries"""
+        current_preset = self.preset_combo.currentText()
+        
+        if not current_preset or current_preset == "No presets available":
+            QMessageBox.information(
+                self, 
+                "No Preset Selected", 
+                "Please select a preset from the dropdown to update."
+            )
+            return
+        
+        if not self.manager.entries:
+            QMessageBox.information(
+                self,
+                "No Entries",
+                "There are no entries to save to the preset."
+            )
+            return
+        
+        reply = QMessageBox.question(
+            self,
+            "Update Preset",
+            f"Are you sure you want to update the preset '{current_preset}' with the current entries?\n\nThis will overwrite the existing preset.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            try:
+                preset_dir = settings.get_preset_dir(self.current_version)
+                preset_path = os.path.join(preset_dir, current_preset + ".json")
+                
+                self.manager.save_preset(preset_path)
+                self.update_status(f"Updated preset: {current_preset}")
+                
+                QMessageBox.information(
+                    self,
+                    "Preset Updated",
+                    f"Successfully updated preset '{current_preset}' with current entries."
+                )
+                
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to update preset: {str(e)}")
+
+    def delete_preset(self):
+        """Delete the currently selected preset"""
+        current_preset = self.preset_combo.currentText()
+        
+        if not current_preset or current_preset == "No presets available":
+            QMessageBox.information(
+                self, 
+                "No Preset Selected", 
+                "Please select a preset from the dropdown to delete."
+            )
+            return
+        
+        reply = QMessageBox.question(
+            self,
+            "Delete Preset",
+            f"Are you sure you want to delete the preset '{current_preset}'?\n\nThis action cannot be undone.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            try:
+                preset_dir = settings.get_preset_dir(self.current_version)
+                preset_path = os.path.join(preset_dir, current_preset + ".json")
+                
+                if os.path.exists(preset_path):
+                    os.remove(preset_path)
+                    
+                    # Refresh the combo box
+                    self.refresh_presets()
+                    
+                    self.update_status(f"Deleted preset: {current_preset}")
+                    
+                    QMessageBox.information(
+                        self,
+                        "Preset Deleted",
+                        f"Successfully deleted preset '{current_preset}'."
+                    )
+                else:
+                    QMessageBox.warning(
+                        self,
+                        "Preset Not Found",
+                        f"Preset file '{current_preset}' was not found."
+                    )
+                    
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to delete preset: {str(e)}")
+
+    def duplicate_preset(self):
+        """Duplicate the currently selected preset with a new name"""
+        current_preset = self.preset_combo.currentText()
+        
+        if not current_preset or current_preset == "No presets available":
+            QMessageBox.information(
+                self, 
+                "No Preset Selected", 
+                "Please select a preset from the dropdown to duplicate."
+            )
+            return
+        
+        # Ask for the new preset name
+        new_name, ok = QInputDialog.getText(
+            self, 
+            "Duplicate Preset", 
+            f"Enter name for duplicate of '{current_preset}':",
+            text=f"{current_preset} - Copy"
+        )
+        
+        if not ok or not new_name.strip():
+            return
+        
+        new_name = new_name.strip()
+        
+        try:
+            preset_dir = settings.get_preset_dir(self.current_version)
+            current_path = os.path.join(preset_dir, current_preset + ".json")
+            new_path = os.path.join(preset_dir, new_name + ".json")
+            
+            # Check if source preset exists
+            if not os.path.exists(current_path):
+                QMessageBox.warning(
+                    self,
+                    "Source Not Found",
+                    f"The preset '{current_preset}' file was not found."
+                )
+                return
+            
+            # Check if new name already exists
+            if os.path.exists(new_path):
+                reply = QMessageBox.question(
+                    self,
+                    "Preset Exists",
+                    f"A preset named '{new_name}' already exists. Replace it?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No
+                )
+                if reply != QMessageBox.Yes:
+                    return
+            
+            # Read the current preset and create duplicate
+            with open(current_path, 'r', encoding='utf-8') as f:
+                preset_data = json.load(f)
+            
+            # Update the name in the duplicated preset
+            preset_data["name"] = new_name
+            
+            # Save the duplicate
+            with open(new_path, 'w', encoding='utf-8') as f:
+                json.dump(preset_data, f, indent=2)
+            
+            # Refresh the combo box and select the new preset
+            self.refresh_presets()
+            self.preset_combo.setCurrentText(new_name)
+            
+            # Save as last used preset
+            s = settings.load_settings()
+            s[f"last_preset_{self.current_version}"] = new_name
+            settings.save_settings(s)
+            
+            self.update_status(f"Duplicated preset: {current_preset} → {new_name}")
+            
+            QMessageBox.information(
+                self,
+                "Preset Duplicated",
+                f"Successfully created duplicate preset '{new_name}' from '{current_preset}'."
+            )
+        
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to duplicate preset: {str(e)}")
 
     def get_vs_dark_stylesheet(self):
         """Visual Studio Dark theme colors"""
@@ -1536,6 +2013,11 @@ def parse_arguments():
         help='Start the application in background mode (system tray)'
     )
     parser.add_argument(
+        '--auto-quit-after-autoclose',
+        action='store_true',
+        help='Automatically quit the application after all auto-close operations complete (requires --start-background)'
+    )
+    parser.add_argument(
         '--show',
         action='store_true',
         help='Show the main window if instance is already running'
@@ -1552,11 +2034,16 @@ def parse_arguments():
 def main():
     args = parse_arguments()
     
+    # Validate argument combinations
+    if args.auto_quit_after_autoclose and not args.start_background:
+        print("Warning: --auto-quit-after-autoclose requires --start-background, enabling background mode")
+        args.start_background = True
+    
     app = QApplication(sys.argv)
     
     # Set application properties
-    app.setApplicationName("MSFS exe.xml Manager")
-    app.setApplicationVersion("1.0.0-rc1")
+    app.setApplicationName("MSFS Startup Manager")
+    app.setApplicationVersion("1.0.0-rc3")
     app.setOrganizationName("Flight Sim Tools")
     
     # Handle single instance
@@ -1588,194 +2075,49 @@ def main():
         print("Failed to start single instance server")
         sys.exit(1)
     
-    # Create main window
+    # Create main window with auto-quit option
     start_hidden = args.start_background or not QSystemTrayIcon.isSystemTrayAvailable()
-    window = MainWindow(start_hidden=start_hidden)
+    window = MainWindow(
+        start_hidden=start_hidden,
+        auto_quit_after_autoclose=args.auto_quit_after_autoclose
+    )
     
     # Connect single instance signals
     instance_manager.show_window_requested.connect(window.show_from_tray)
     instance_manager.shutdown_requested.connect(window.exit_application)
     
     # Cleanup on application exit
-    app.aboutToQuit.connect(instance_manager.cleanup)
+    def cleanup_on_exit():
+        print("Application aboutToQuit - final cleanup")
+        try:
+            instance_manager.cleanup()
+            # Force any remaining cleanup
+            if hasattr(window, 'process_monitor'):
+                window.process_monitor.stop_monitoring()
+            if hasattr(window, 'stop_all_timers'):
+                window.stop_all_timers()
+        except Exception as e:
+            print(f"Error during final cleanup: {e}")
+    
+    app.aboutToQuit.connect(cleanup_on_exit)
     
     # Show window if not starting in background
     if not start_hidden:
         window.show()
+    elif args.auto_quit_after_autoclose:
+        print("Started in background mode with auto-quit after autoclose enabled")
     
     # Start event loop
-    sys.exit(app.exec())
-
-    def on_simulator_stopped(self, sim_name):
-        """Called when the simulator process stops"""
-        print(f"\n=== Simulator Stopped Event ===")
-        print(f"Simulator: {sim_name}")
-        
-        # Debug current state
-        self.process_monitor.debug_status()
-        
-        # Find all entries that should be auto-closed
-        auto_close_entries = []
-        for entry in self.manager.entries:
-            if entry.auto_close and entry.enabled:
-                auto_close_entries.append(entry)
-                print(f"Auto-close entry found: {entry.name} -> {entry.path}")
-        
-        if not auto_close_entries:
-            print("No auto-close entries found")
-            self.update_status(f"Simulator stopped ({sim_name}) - No auto-close addons")
-            return
-        
-        # Terminate all addon processes that should auto-close
-        total_terminated = 0
-        
-        for entry in auto_close_entries:
-            addon_name = entry.name
-            process_count = self.process_monitor.get_addon_process_count(addon_name)
-            print(f"Checking {addon_name}: {process_count} running processes")
-            
-            if process_count > 0:
-                try:
-                    terminated = self.process_monitor.terminate_addon_processes(addon_name)
-                    total_terminated += terminated
-                    print(f"Terminated {terminated} process(es) for {addon_name}")
-                except Exception as e:
-                    print(f"Error terminating {addon_name}: {e}")
-        
-        # Also try to terminate any other running addon processes
-        additional_terminated = self.process_monitor.terminate_all_addon_processes()
-        if additional_terminated > total_terminated:
-            print(f"Terminated {additional_terminated - total_terminated} additional processes")
-            total_terminated = additional_terminated
-        
-        # Update status
-        if total_terminated > 0:
-            status_message = f"Simulator stopped - Auto-closed {total_terminated} addon(s)"
-            print(f"SUCCESS: {status_message}")
-        else:
-            status_message = f"Simulator stopped ({sim_name}) - No addons to close"
-            print(f"NO ACTION: {status_message}")
-        
-        self.update_status(status_message)
-        
-        # Show tray notification if running in background
-        if self.tray_manager.is_visible():
-            if total_terminated > 0:
-                self.tray_manager.show_message(
-                    "Auto-Close Complete",
-                    f"Closed {total_terminated} addon(s) when {sim_name} stopped",
-                    QSystemTrayIcon.Information
-                )
-            else:
-                self.tray_manager.show_message(
-                    "Simulator Stopped",
-                    f"{sim_name} stopped (no addons to close)",
-                    QSystemTrayIcon.Information
-                )
-        
-        print("=== End Simulator Stopped Event ===\n")
-
-    def update_process_monitoring(self):
-        """Update process monitoring for all auto-close entries"""
-        print("\n=== Updating Process Monitoring ===")
-        
-        # Clear current monitoring
-        for addon_name in list(self.running_addons.keys()):
-            self.process_monitor.remove_addon_from_monitor(addon_name)
-        self.running_addons.clear()
-        
-        # Add all auto-close entries to monitoring
-        for entry in self.manager.entries:
-            if entry.auto_close and entry.enabled and os.path.exists(entry.path):
-                self.process_monitor.add_addon_to_monitor(entry.name, entry.path)
-                self.running_addons[entry.name] = {
-                    'process': None,
-                    'path': entry.path,
-                    'auto_close': True
-                }
-                print(f"Added to monitoring: {entry.name} -> {entry.path}")
-            elif entry.auto_close and entry.enabled:
-                print(f"WARNING: Auto-close entry path does not exist: {entry.name} -> {entry.path}")
-            elif entry.auto_close and not entry.enabled:
-                print(f"Skipping disabled auto-close entry: {entry.name}")
-        
-        print("=== Process Monitoring Updated ===\n")
-
-    def run_entry(self):
-        rows = self.table.selectionModel().selectedRows()
-        if not rows:
-            QMessageBox.information(self, "No Selection", "Please select an entry to run.")
-            return
-        
-        index = rows[0].row()
-        try:
-            entry = self.manager.entries[index]
-            print(f"\n=== Running Entry ===")
-            print(f"Name: {entry.name}")
-            print(f"Path: {entry.path}")
-            print(f"Args: {entry.args}")
-            print(f"Auto-close: {entry.auto_close}")
-            
-            process = self.manager.execute_entry(index)
-            
-            if process:
-                print(f"Process started with PID: {process.pid}")
-                
-                if entry.auto_close:
-                    # Track this process for auto-closing
-                    self.process_monitor.add_addon_to_monitor(entry.name, entry.path)
-                    self.running_addons[entry.name] = {
-                        'process': process,
-                        'path': entry.path,
-                        'auto_close': True
-                    }
-                    print(f"Added to auto-close monitoring: {entry.name} (PID: {process.pid})")
-                
-                self.update_status(f"Launched {entry.name}")
-                
-                # Show tray notification if running in background
-                if self.tray_manager.is_visible() and self.isHidden():
-                    self.tray_manager.show_message(
-                        "Addon Launched",
-                        f"Started {entry.name}",
-                        QSystemTrayIcon.Information
-                    )
-            else:
-                print("Failed to start process")
-                self.update_status(f"Failed to launch {entry.name}")
-                
-            print("=== End Running Entry ===\n")
-            
-        except Exception as e:
-            print(f"Error running entry: {e}")
-            QMessageBox.critical(self, "Error", str(e))
-
-    # Also add this debug method for troubleshooting
-    def debug_auto_close_status(self):
-        """Debug method to check auto-close status"""
-        print("\n=== Debug Auto-Close Status ===")
-        print(f"Process monitor active: {self.process_monitor.monitoring}")
-        print(f"Simulator running: {self.process_monitor.is_simulator_running()}")
-        
-        print("Auto-close entries:")
-        for i, entry in enumerate(self.manager.entries):
-            if entry.auto_close:
-                exists = os.path.exists(entry.path)
-                process_count = self.process_monitor.get_addon_process_count(entry.name)
-                print(f"  {i}: {entry.name}")
-                print(f"      Path: {entry.path}")
-                print(f"      Enabled: {entry.enabled}")
-                print(f"      Path exists: {exists}")
-                print(f"      Running processes: {process_count}")
-        
-        print("Tracked addons:")
-        for name, info in self.running_addons.items():
-            print(f"  {name}: {info}")
-        
-        self.process_monitor.debug_status()
-        print("=== End Debug ===\n")
-
-    # You can call this debug method from a menu item or button for troubleshooting
+    try:
+        exit_code = app.exec()
+        print(f"Application exec finished with code: {exit_code}")
+        sys.exit(exit_code)
+    except KeyboardInterrupt:
+        print("Keyboard interrupt - forcing exit")
+        sys.exit(1)
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

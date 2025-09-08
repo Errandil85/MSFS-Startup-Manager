@@ -1,2 +1,2 @@
-# MSFS-exe.xml-Manager
-MSFS exe.xml Manager
+# MSFS-Startup-Manager
+MSFS Startup Manager

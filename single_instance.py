@@ -15,7 +15,7 @@ class SingleInstanceManager(QObject):
     show_window_requested = Signal()
     shutdown_requested = Signal()
     
-    def __init__(self, app_name="MSFSExeXmlManager"):
+    def __init__(self, app_name="MSFSStartupManager"):
         super().__init__()
         self.app_name = app_name
         self.server_name = f"{app_name}_SingleInstance"
