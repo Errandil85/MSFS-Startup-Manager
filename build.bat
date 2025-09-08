@@ -13,7 +13,7 @@ REM Install deps
 pip install -r requirements.txt
 pip install pyinstaller
 
-set APP_NAME=MSFS-exe-xml-Manager
+set APP_NAME=MSFS-Startup-Manager
 set ICON_FILE=icon.ico
 
 REM Clean old builds

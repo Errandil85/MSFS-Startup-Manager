@@ -22,7 +22,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='MSFS-exe-xml-Manager',
+    name='MSFS-Startup-Manager',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

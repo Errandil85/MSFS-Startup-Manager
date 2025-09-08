@@ -54,7 +54,7 @@ class SystemTrayManager(QObject):
                 painter.end()
                 self.tray_icon.setIcon(QIcon(pixmap))
         
-        self.tray_icon.setToolTip("MSFS exe.xml Manager")
+        self.tray_icon.setToolTip("MSFS Startup Manager")
         
         # Create tray menu
         self.create_tray_menu()

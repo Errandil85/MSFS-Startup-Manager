@@ -161,7 +161,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.start_hidden = start_hidden
         self.auto_quit_after_autoclose = auto_quit_after_autoclose  # New parameter
-        self.setWindowTitle("MSFS exe.xml Manager")
+        self.setWindowTitle("MSFS Startup Manager")
         self.setMinimumSize(1000, 700)
         self.setWindowIcon(QIcon("icon.ico"))
         
@@ -215,7 +215,7 @@ class MainWindow(QMainWindow):
             if self.auto_quit_after_autoclose:
                 print("Auto-quit after autoclose is enabled")
             self.tray_manager.show_message(
-                "MSFS exe.xml Manager", 
+                "MSFS Startup Manager", 
                 "Application started in background mode",
                 QSystemTrayIcon.Information
             )
@@ -369,7 +369,7 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout()
         
         # Title
-        title = ModernLabel("MSFS exe.xml Manager")
+        title = ModernLabel("MSFS Startup Manager")
         title.setObjectName("mainTitle")
         layout.addWidget(title)
         
@@ -793,8 +793,8 @@ class MainWindow(QMainWindow):
         """Show about dialog"""
         QMessageBox.about(
             self,
-            "About MSFS exe.xml Manager",
-            f"<h3>MSFS exe.xml Manager v1.0.0-rc3</h3>"
+            "About MSFS Startup Manager",
+            f"<h3>MSFS Startup Manager v1.0.0-rc3</h3>"
             f"<p>A modern tool for managing Microsoft Flight Simulator addons.</p>"
             f"<p><b>Features:</b></p>"
             f"<ul>"
@@ -1447,11 +1447,11 @@ class MainWindow(QMainWindow):
             
             # Check if entry already exists
             for entry in self.manager.entries:
-                if "exe.xml Manager" in entry.name and "background" in entry.args.lower():
+                if "Startup Manager" in entry.name and "background" in entry.args.lower():
                     reply = QMessageBox.question(
                         self,
                         "Entry Exists",
-                        "An exe.xml Manager background entry already exists. Replace it?",
+                        "An Startup Manager background entry already exists. Replace it?",
                         QMessageBox.Yes | QMessageBox.No
                     )
                     if reply == QMessageBox.Yes:
@@ -1468,7 +1468,7 @@ class MainWindow(QMainWindow):
                     self.update_status(f"Backup created: {os.path.basename(backup_path)}")
             
             # Add the entry
-            entry_name = f"MSFS exe.xml Manager (Background)"
+            entry_name = f"MSFS Startup Manager (Background)"
             args = "--start-background --auto-quit-after-autoclose"
             
             self.manager.add_entry(
@@ -2042,7 +2042,7 @@ def main():
     app = QApplication(sys.argv)
     
     # Set application properties
-    app.setApplicationName("MSFS exe.xml Manager")
+    app.setApplicationName("MSFS Startup Manager")
     app.setApplicationVersion("1.0.0-rc3")
     app.setOrganizationName("Flight Sim Tools")
     
