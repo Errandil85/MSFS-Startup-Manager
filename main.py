@@ -18,6 +18,7 @@ from single_instance import SingleInstanceManager
 from system_tray import SystemTrayManager
 import settings
 from PySide6.QtGui import QIcon
+import json
 
 
 class BackupDialog(QMessageBox):
@@ -493,6 +494,10 @@ class MainWindow(QMainWindow):
         delete_preset_btn = ModernButton("Delete", "🗑️")
         delete_preset_btn.clicked.connect(self.delete_preset)
         delete_preset_btn.setToolTip("Delete the currently selected preset")
+
+        duplicate_preset_btn = ModernButton("Duplicate", "📄")
+        duplicate_preset_btn.clicked.connect(self.duplicate_preset)
+        duplicate_preset_btn.setToolTip("Create a copy of the currently selected preset")
                 
         preset_layout.addWidget(preset_label)
         preset_layout.addWidget(self.preset_combo)
@@ -501,6 +506,7 @@ class MainWindow(QMainWindow):
         preset_layout.addWidget(save_preset_btn)
         preset_layout.addWidget(update_preset_btn)
         preset_layout.addWidget(delete_preset_btn)
+        preset_layout.addWidget(duplicate_preset_btn)
         
         layout.addLayout(preset_layout)
         
@@ -1581,6 +1587,88 @@ class MainWindow(QMainWindow):
                     
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to delete preset: {str(e)}")
+
+    def duplicate_preset(self):
+        """Duplicate the currently selected preset with a new name"""
+        current_preset = self.preset_combo.currentText()
+        
+        if not current_preset or current_preset == "No presets available":
+            QMessageBox.information(
+                self, 
+                "No Preset Selected", 
+                "Please select a preset from the dropdown to duplicate."
+            )
+            return
+        
+        # Ask for the new preset name
+        new_name, ok = QInputDialog.getText(
+            self, 
+            "Duplicate Preset", 
+            f"Enter name for duplicate of '{current_preset}':",
+            text=f"{current_preset} - Copy"
+        )
+        
+        if not ok or not new_name.strip():
+            return
+        
+        new_name = new_name.strip()
+        
+        try:
+            preset_dir = settings.get_preset_dir(self.current_version)
+            current_path = os.path.join(preset_dir, current_preset + ".json")
+            new_path = os.path.join(preset_dir, new_name + ".json")
+            
+            # Check if source preset exists
+            if not os.path.exists(current_path):
+                QMessageBox.warning(
+                    self,
+                    "Source Not Found",
+                    f"The preset '{current_preset}' file was not found."
+                )
+                return
+            
+            # Check if new name already exists
+            if os.path.exists(new_path):
+                reply = QMessageBox.question(
+                    self,
+                    "Preset Exists",
+                    f"A preset named '{new_name}' already exists. Replace it?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No
+                )
+                if reply != QMessageBox.Yes:
+                    return
+            
+            # Read the current preset and create duplicate
+            with open(current_path, 'r', encoding='utf-8') as f:
+                preset_data = json.load(f)
+            
+            # Update the name in the duplicated preset
+            preset_data["name"] = new_name
+            
+            # Save the duplicate
+            with open(new_path, 'w', encoding='utf-8') as f:
+                json.dump(preset_data, f, indent=2)
+            
+            # Refresh the combo box and select the new preset
+            self.refresh_presets()
+            self.preset_combo.setCurrentText(new_name)
+            
+            # Save as last used preset
+            s = settings.load_settings()
+            s[f"last_preset_{self.current_version}"] = new_name
+            settings.save_settings(s)
+            
+            self.update_status(f"Duplicated preset: {current_preset} → {new_name}")
+            
+            QMessageBox.information(
+                self,
+                "Preset Duplicated",
+                f"Successfully created duplicate preset '{new_name}' from '{current_preset}'."
+            )
+        
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to duplicate preset: {str(e)}")
 
     def get_vs_dark_stylesheet(self):
         """Visual Studio Dark theme colors"""
