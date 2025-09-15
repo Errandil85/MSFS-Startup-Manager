@@ -20,6 +20,15 @@ import settings
 from PySide6.QtGui import QIcon
 import json
 
+def get_resource_path(relative_path):
+    """Get absolute path to resource, works for dev and for PyInstaller"""
+    try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    
+    return os.path.join(base_path, relative_path)
 
 class BackupDialog(QMessageBox):
     def __init__(self, exe_xml_path, sim_version, parent=None):
@@ -163,7 +172,9 @@ class MainWindow(QMainWindow):
         self.auto_quit_after_autoclose = auto_quit_after_autoclose  # New parameter
         self.setWindowTitle("MSFS Startup Manager")
         self.setMinimumSize(1000, 700)
-        self.setWindowIcon(QIcon("icon.ico"))
+        icon_path = get_resource_path("icon.ico")
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
         
         # Apply Visual Studio dark theme
         self.setStyleSheet(self.get_vs_dark_stylesheet())

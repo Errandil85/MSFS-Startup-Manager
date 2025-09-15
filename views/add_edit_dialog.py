@@ -4,6 +4,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
+import os
 
 
 class ModernLineEdit(QLineEdit):
@@ -147,15 +148,152 @@ class AddEditDialog(QDialog):
         )
         if file_path:
             self.path_edit.setText(file_path)
+            
+            # Auto-detect name if the name field is empty or has placeholder text
+            current_name = self.name_edit.text().strip()
+            if not current_name or current_name == "e.g., FSUIPC7, FSRealistic":
+                detected_name = self.get_exe_display_name(file_path)
+                if detected_name:
+                    self.name_edit.setText(detected_name)
+
+    def get_exe_display_name(self, file_path):
+        """
+        Extract display name from executable metadata.
+        Tries multiple methods in order of preference.
+        """
+        if not os.path.exists(file_path):
+            return None
+        
+        # Method 1: Try pefile library (most reliable and modern)
+        try:
+            import pefile
+            
+            pe = pefile.PE(file_path)
+            
+            if hasattr(pe, 'VS_VERSIONINFO'):
+                for file_info in pe.FileInfo:
+                    if hasattr(file_info, 'StringTable'):
+                        for string_table in file_info.StringTable:
+                            # Look for ProductName first
+                            for key, value in string_table.entries.items():
+                                key_str = key.decode('utf-8', errors='ignore')
+                                if key_str == 'ProductName':
+                                    product_name = value.decode('utf-8', errors='ignore').strip()
+                                    if product_name:
+                                        pe.close()
+                                        return product_name
+                            
+                            # Then FileDescription
+                            for key, value in string_table.entries.items():
+                                key_str = key.decode('utf-8', errors='ignore')
+                                if key_str == 'FileDescription':
+                                    file_desc = value.decode('utf-8', errors='ignore').strip()
+                                    if file_desc:
+                                        pe.close()
+                                        return file_desc
+                            
+                            # Finally InternalName
+                            for key, value in string_table.entries.items():
+                                key_str = key.decode('utf-8', errors='ignore')
+                                if key_str == 'InternalName':
+                                    internal_name = value.decode('utf-8', errors='ignore').strip()
+                                    if internal_name:
+                                        # Remove .exe extension if present
+                                        if internal_name.lower().endswith('.exe'):
+                                            internal_name = internal_name[:-4]
+                                        pe.close()
+                                        return internal_name
+            
+            pe.close()
+            
+        except ImportError:
+            # pefile not available
+            pass
+        except Exception:
+            # Error reading PE file
+            pass
+        
+        # Method 2: Try using Windows PowerShell (Windows-specific, no extra dependencies)
+        try:
+            import subprocess
+            import json
+            
+            # Use PowerShell to get file version info
+            ps_command = f'''
+            $version = [System.Diagnostics.FileVersionInfo]::GetVersionInfo("{file_path}")
+            $result = @{{
+                ProductName = $version.ProductName
+                FileDescription = $version.FileDescription
+                InternalName = $version.InternalName
+            }}
+            $result | ConvertTo-Json
+            '''
+            
+            result = subprocess.run(
+                ["powershell", "-Command", ps_command],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            
+            if result.returncode == 0 and result.stdout.strip():
+                data = json.loads(result.stdout.strip())
+                
+                # Try ProductName first
+                if data.get('ProductName') and data['ProductName'].strip():
+                    return data['ProductName'].strip()
+                
+                # Then FileDescription
+                if data.get('FileDescription') and data['FileDescription'].strip():
+                    return data['FileDescription'].strip()
+                
+                # Finally InternalName
+                if data.get('InternalName') and data['InternalName'].strip():
+                    name = data['InternalName'].strip()
+                    if name.lower().endswith('.exe'):
+                        name = name[:-4]
+                    return name
+                    
+        except Exception:
+            # PowerShell method failed
+            pass
+        
+        # Method 3: Fallback to filename without extension
+        try:
+            base_name = os.path.splitext(os.path.basename(file_path))[0]
+            
+            # Clean up common patterns
+            # Remove version numbers like "v1.2.3" or "1.0"
+            import re
+            cleaned_name = re.sub(r'\s*v?\d+(\.\d+)*\s*$', '', base_name, flags=re.IGNORECASE)
+            
+            # Remove common suffixes
+            suffixes_to_remove = ['_setup', '_installer', '_x64', '_x86', '_win64', '_win32']
+            for suffix in suffixes_to_remove:
+                if cleaned_name.lower().endswith(suffix.lower()):
+                    cleaned_name = cleaned_name[:-len(suffix)]
+                    break
+            
+            # Capitalize first letter of each word for better presentation
+            if cleaned_name:
+                return ' '.join(word.capitalize() for word in cleaned_name.replace('_', ' ').replace('-', ' ').split())
+            else:
+                return base_name
+                
+        except Exception:
+            pass
+        
+        # If all else fails, return the filename
+        return os.path.basename(file_path)
 
     def get_data(self):
-        # FIXED: Now returns 5 values including auto_close
+        # Returns 5 values including auto_close
         return (
             self.name_edit.text().strip(),
             self.path_edit.text().strip(),
             self.args_edit.text().strip(),
             self.enabled_check.isChecked(),
-            self.auto_close_check.isChecked()  # ADDED
+            self.auto_close_check.isChecked()
         )
 
     def get_vs_dark_dialog_stylesheet(self):
