@@ -3,13 +3,13 @@ import os
 import argparse
 import xml.etree.ElementTree as ET
 from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, QWidget, 
+    QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, QWidget,
     QTableWidget, QTableWidgetItem, QPushButton, QComboBox, QLabel,
     QFileDialog, QMessageBox, QAbstractItemView, QInputDialog, QFrame,
     QHeaderView, QSpacerItem, QSizePolicy, QMenu, QMenuBar, QCheckBox,
-    QSystemTrayIcon
+    QSystemTrayIcon, QToolBar, QToolButton, QStyle, QFileIconProvider
 )
-from PySide6.QtCore import Qt, QSize, QTimer
+from PySide6.QtCore import Qt, QSize, QTimer, QFileInfo
 from PySide6.QtGui import QFont, QIcon, QPalette, QColor, QAction, QCloseEvent
 from exexml import ExeXmlManager
 from views.add_edit_dialog import AddEditDialog
@@ -19,6 +19,9 @@ from system_tray import SystemTrayManager
 import settings
 from PySide6.QtGui import QIcon
 import json
+from logging_config import get_logger
+
+logger = get_logger(__name__)
 
 def get_resource_path(relative_path):
     """Get absolute path to resource, works for dev and for PyInstaller"""
@@ -152,7 +155,7 @@ class ModernButton(QPushButton):
 class ModernComboBox(QComboBox):
     def __init__(self):
         super().__init__()
-        self.setMinimumHeight(36)
+        self.setMinimumHeight(32)
         self.setMinimumWidth(120)
 
 
@@ -176,8 +179,8 @@ class MainWindow(QMainWindow):
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
         
-        # Apply Visual Studio dark theme
-        self.setStyleSheet(self.get_vs_dark_stylesheet())
+        # Apply light theme
+        self.setStyleSheet(self.get_light_stylesheet())
         
         # Manager backend
         self.manager = ExeXmlManager()
@@ -201,6 +204,9 @@ class MainWindow(QMainWindow):
         
         # Track active timers for cleanup
         self.active_timers = []
+
+        # Icon provider for showing real executable icons in the table
+        self.icon_provider = QFileIconProvider()
         
         # Setup UI
         self.setup_ui()
@@ -222,9 +228,9 @@ class MainWindow(QMainWindow):
         if not start_hidden:
             self.show()
         elif self.tray_manager.is_visible():
-            print("Started in background mode - running in system tray")
+            logger.info("Started in background mode - running in system tray")
             if self.auto_quit_after_autoclose:
-                print("Auto-quit after autoclose is enabled")
+                logger.info("Auto-quit after autoclose is enabled")
             self.tray_manager.show_message(
                 "MSFS Startup Manager", 
                 "Application started in background mode",
@@ -236,22 +242,22 @@ class MainWindow(QMainWindow):
         # Create menu bar
         self.create_menu_bar()
 
+        # Create toolbar (replaces the old header/controls button rows)
+        self.create_toolbar()
+
         # Create main widget and layout
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
         
         # Main layout
         layout = QVBoxLayout(main_widget)
-        layout.setSpacing(20)
-        layout.setContentsMargins(24, 24, 24, 24)
-        
-        # Header section
-        header_layout = self.create_header()
-        layout.addLayout(header_layout)
-        
-        # Controls section
-        controls_layout = self.create_controls()
-        layout.addLayout(controls_layout)
+        layout.setSpacing(12)
+        layout.setContentsMargins(16, 12, 16, 16)
+
+        # Title
+        title = ModernLabel("MSFS Startup Manager")
+        title.setObjectName("mainTitle")
+        layout.addWidget(title)
         
         # Table section
         self.create_table()
@@ -260,13 +266,125 @@ class MainWindow(QMainWindow):
         # Status section
         status_layout = self.create_status()
         layout.addLayout(status_layout)
+
+    def create_toolbar(self):
+        """Compact icon toolbar - replaces the old three rows of full-width buttons."""
+        toolbar = QToolBar("Main")
+        toolbar.setIconSize(QSize(20, 20))
+        toolbar.setMovable(False)
+        toolbar.setObjectName("mainToolbar")
+        self.addToolBar(toolbar)
+
+        style = self.style()
+
+        # --- Preset selector + menu ---
+        self.preset_combo = ModernComboBox()
+        self.preset_combo.setMinimumWidth(180)
+        toolbar.addWidget(self.preset_combo)
+
+        preset_menu_btn = QToolButton()
+        preset_menu_btn.setText("Presets ▾")
+        preset_menu_btn.setToolTip("Preset actions")
+        preset_menu_btn.setPopupMode(QToolButton.InstantPopup)
+        preset_menu = QMenu(preset_menu_btn)
+        preset_menu.addAction("Load", self.load_preset_from_combo)
+        preset_menu.addAction("Save As New...", self.save_preset)
+        preset_menu.addAction("Update Current", self.update_current_preset)
+        preset_menu.addSeparator()
+        preset_menu.addAction("Duplicate...", self.duplicate_preset)
+        preset_menu.addAction("Delete...", self.delete_preset)
+        preset_menu_btn.setMenu(preset_menu)
+        toolbar.addWidget(preset_menu_btn)
+
+        toolbar.addSeparator()
+
+        # --- Entry actions ---
+        self.add_action = QAction(style.standardIcon(QStyle.SP_FileDialogNewFolder), "Add", self)
+        self.add_action.setToolTip("Add a new addon entry")
+        self.add_action.triggered.connect(self.add_entry)
+        toolbar.addAction(self.add_action)
+
+        self.modify_action = QAction(style.standardIcon(QStyle.SP_FileDialogDetailedView), "Modify", self)
+        self.modify_action.setToolTip("Modify the selected entry")
+        self.modify_action.triggered.connect(self.modify_entry)
+        self.modify_action.setEnabled(False)
+        toolbar.addAction(self.modify_action)
+
+        self.remove_action = QAction(style.standardIcon(QStyle.SP_TrashIcon), "Remove", self)
+        self.remove_action.setToolTip("Remove the selected entry")
+        self.remove_action.triggered.connect(self.remove_entry)
+        self.remove_action.setEnabled(False)
+        toolbar.addAction(self.remove_action)
+
+        self.run_action = QAction(style.standardIcon(QStyle.SP_MediaPlay), "Run", self)
+        self.run_action.setToolTip("Run the selected entry now")
+        self.run_action.triggered.connect(self.run_entry)
+        self.run_action.setEnabled(False)
+        toolbar.addAction(self.run_action)
+
+        toolbar.addSeparator()
+
+        # --- File actions ---
+        load_action = QAction(style.standardIcon(QStyle.SP_DialogOpenButton), "Load exe.xml", self)
+        load_action.setToolTip("Load an exe.xml file")
+        load_action.triggered.connect(self.load_exe)
+        toolbar.addAction(load_action)
+
+        apply_action = QAction(style.standardIcon(QStyle.SP_DialogApplyButton), "Apply", self)
+        apply_action.setToolTip("Save changes to exe.xml")
+        apply_action.triggered.connect(self.save_exe)
+        toolbar.addAction(apply_action)
+
+        toolbar.addSeparator()
+
+        auto_detect_action = QAction(style.standardIcon(QStyle.SP_BrowserReload), "Auto-detect", self)
+        auto_detect_action.setToolTip("Automatically detect exe.xml files for the current simulator version")
+        auto_detect_action.triggered.connect(self.auto_detect_exe)
+        toolbar.addAction(auto_detect_action)
+
+        add_self_action = QAction(style.standardIcon(QStyle.SP_ComputerIcon), "Add Self to Startup", self)
+        add_self_action.setToolTip("Add this application to exe.xml to start automatically with the simulator")
+        add_self_action.triggered.connect(self.add_self_to_startup)
+        toolbar.addAction(add_self_action)
+
+        toolbar.addSeparator()
+
+        # --- Simulator version selector ---
+        version_label = QLabel("Sim:")
+        version_label.setObjectName("fieldLabel")
+        toolbar.addWidget(version_label)
+
+        self.sim_combo = ModernComboBox()
+        self.sim_combo.addItems(["MSFS2020", "MSFS2024"])
+        self.sim_combo.setCurrentText(self.current_version)
+        self.sim_combo.currentTextChanged.connect(self.change_version)
+        toolbar.addWidget(self.sim_combo)
+
+        toolbar.addSeparator()
+
+        # Spacer pushes Quit to the far right of the toolbar
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        toolbar.addWidget(spacer)
+
+        quit_action = QAction(style.standardIcon(QStyle.SP_TitleBarCloseButton), "Quit", self)
+        quit_action.setToolTip("Exit the application completely")
+        quit_action.triggered.connect(self.exit_application)
+        toolbar.addAction(quit_action)
+        # Give the Quit button its own object name so it can get a distinct
+        # (red) hover state instead of blending in with the other actions.
+        quit_button = toolbar.widgetForAction(quit_action)
+        if quit_button is not None:
+            quit_button.setObjectName("quitToolButton")
+
+        return toolbar
     
     def setup_tray(self):
         """Setup system tray functionality"""
         if self.tray_manager.setup_tray():
-            print("System tray initialized")
+            logger.info("System tray initialized")
         else:
-            print("Failed to initialize system tray")
+            logger.error("Failed to initialize system tray")
             if self.start_hidden:
                 # If we can't use tray and started hidden, show the window
                 self.show()
@@ -276,11 +394,11 @@ class MainWindow(QMainWindow):
         self.show()
         self.raise_()
         self.activateWindow()
-        print("Window shown from system tray")
+        logger.info("Window shown from system tray")
     
     def force_complete_shutdown(self):
         """Force immediate shutdown for auto-quit mode"""
-        print("\n=== Force Complete Shutdown ===")
+        logger.info("\n=== Force Complete Shutdown ===")
         
         try:
             # Stop all timers first
@@ -301,12 +419,12 @@ class MainWindow(QMainWindow):
             QApplication.quit()
             
         except Exception as e:
-            print(f"Error during force shutdown: {e}")
+            logger.error(f"Error during force shutdown: {e}")
             # Force exit regardless of errors
             import os
             os._exit(0)
         
-        print("=== Force Complete Shutdown Complete ===\n")
+        logger.info("=== Force Complete Shutdown Complete ===\n")
     
     def exit_application(self):
         """Exit the application completely"""
@@ -352,12 +470,6 @@ class MainWindow(QMainWindow):
         
         file_menu.addSeparator()
         
-        # Settings
-        #settings_action = QAction('Settings...', self)
-        #file_menu.addAction(settings_action)
-        
-        #file_menu.addSeparator()
-        
         # Exit
         exit_action = QAction('Exit', self)
         exit_action.triggered.connect(self.exit_application)
@@ -376,153 +488,6 @@ class MainWindow(QMainWindow):
         # save this preference and use it on next startup
         pass
 
-    def create_header(self):
-        layout = QVBoxLayout()
-        
-        # Title
-        title = ModernLabel("MSFS Startup Manager")
-        title.setObjectName("mainTitle")
-        layout.addWidget(title)
-        
-        # Subtitle with version selector
-        subtitle_layout = QHBoxLayout()
-        
-        subtitle = ModernLabel("Manage your Flight Simulator addons", subtitle=True)
-        subtitle_layout.addWidget(subtitle)
-        
-        subtitle_layout.addStretch()
-        
-        # Auto-detect button
-        auto_detect_btn = ModernButton("Auto-detect", "🔍")
-        auto_detect_btn.clicked.connect(self.auto_detect_exe)
-        auto_detect_btn.setToolTip("Automatically detect exe.xml files for the current simulator version")
-        subtitle_layout.addWidget(auto_detect_btn)
-        
-        # Version selector
-        version_label = QLabel("Simulator:")
-        version_label.setObjectName("fieldLabel")
-        subtitle_layout.addWidget(version_label)
-        
-        self.sim_combo = ModernComboBox()
-        self.sim_combo.addItems(["MSFS2020", "MSFS2024"])
-        self.sim_combo.setCurrentText(self.current_version)
-        self.sim_combo.currentTextChanged.connect(self.change_version)
-        subtitle_layout.addWidget(self.sim_combo)
-        
-        layout.addLayout(subtitle_layout)
-        
-        # Separator
-        separator = QFrame()
-        separator.setFrameShape(QFrame.HLine)
-        separator.setObjectName("separator")
-        layout.addWidget(separator)
-        
-        return layout
-
-    def create_controls(self):
-        layout = QVBoxLayout()
-        layout.setSpacing(16)
-        
-        # File operations
-        file_layout = QHBoxLayout()
-        file_layout.setSpacing(12)
-        
-        file_label = ModernLabel("File Operations")
-        file_label.setObjectName("sectionTitle")
-        
-        load_btn = ModernButton("Load exe.xml", "📂", primary=True)
-        load_btn.clicked.connect(self.load_exe)
-        
-        save_btn = ModernButton("Apply", "✅")
-        save_btn.clicked.connect(self.save_exe)
-
-        quit_btn = ModernButton("Quit", "❌")
-        quit_btn.clicked.connect(self.exit_application)
-        quit_btn.setToolTip("Exit the application completely")
-        
-        file_layout.addWidget(file_label)
-        file_layout.addStretch()
-        file_layout.addWidget(load_btn)
-        file_layout.addWidget(save_btn)
-        file_layout.addWidget(quit_btn)
-        
-        layout.addLayout(file_layout)
-        
-        # Entry operations
-        entry_layout = QHBoxLayout()
-        entry_layout.setSpacing(12)
-        
-        entry_label = ModernLabel("Entry Operations")
-        entry_label.setObjectName("sectionTitle")
-        
-        add_btn = ModernButton("Add", "➕")
-        add_btn.clicked.connect(self.add_entry)
-        
-        modify_btn = ModernButton("Modify", "✏️")
-        modify_btn.clicked.connect(self.modify_entry)
-        
-        remove_btn = ModernButton("Remove", "🗑️")
-        remove_btn.clicked.connect(self.remove_entry)
-        
-        run_btn = ModernButton("Run", "▶️")
-        run_btn.clicked.connect(self.run_entry)
-
-        add_self_btn = ModernButton("Add Self to Startup", "⚡")
-        add_self_btn.clicked.connect(self.add_self_to_startup)
-        add_self_btn.setToolTip("Add this application to exe.xml to start automatically with the simulator")
-
-        
-        entry_layout.addWidget(entry_label)
-        entry_layout.addStretch()
-        entry_layout.addWidget(add_btn)
-        entry_layout.addWidget(modify_btn)
-        entry_layout.addWidget(remove_btn)
-        entry_layout.addWidget(run_btn)
-        entry_layout.addWidget(add_self_btn)
-        
-        layout.addLayout(entry_layout)
-        
-        # Preset operations
-        preset_layout = QHBoxLayout()
-        preset_layout.setSpacing(12)
-        
-        preset_label = ModernLabel("Presets")
-        preset_label.setObjectName("sectionTitle")
-        
-        self.preset_combo = ModernComboBox()
-        self.preset_combo.setMinimumWidth(200)
-        
-        load_preset_btn = ModernButton("Load", "📋")
-        load_preset_btn.clicked.connect(self.load_preset_from_combo)
-        
-        save_preset_btn = ModernButton("Save", "💾")
-        save_preset_btn.clicked.connect(self.save_preset)
-
-        update_preset_btn = ModernButton("Update Current", "🔄")
-        update_preset_btn.clicked.connect(self.update_current_preset)
-        update_preset_btn.setToolTip("Save changes to the currently selected preset")
-
-        delete_preset_btn = ModernButton("Delete", "🗑️")
-        delete_preset_btn.clicked.connect(self.delete_preset)
-        delete_preset_btn.setToolTip("Delete the currently selected preset")
-
-        duplicate_preset_btn = ModernButton("Duplicate", "📄")
-        duplicate_preset_btn.clicked.connect(self.duplicate_preset)
-        duplicate_preset_btn.setToolTip("Create a copy of the currently selected preset")
-                
-        preset_layout.addWidget(preset_label)
-        preset_layout.addWidget(self.preset_combo)
-        preset_layout.addStretch()
-        preset_layout.addWidget(load_preset_btn)
-        preset_layout.addWidget(save_preset_btn)
-        preset_layout.addWidget(update_preset_btn)
-        preset_layout.addWidget(delete_preset_btn)
-        preset_layout.addWidget(duplicate_preset_btn)
-        
-        layout.addLayout(preset_layout)
-        
-        return layout
-
     def create_table(self):
         self.table = QTableWidget()
         self.table.setColumnCount(5)  # Added Auto-Close column
@@ -531,6 +496,12 @@ class MainWindow(QMainWindow):
         self.table.setAlternatingRowColors(True)
         self.table.setShowGrid(False)
         self.table.itemChanged.connect(self.on_item_changed)
+
+        # Selection-aware toolbar actions + right-click menu + double-click to edit
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self.show_table_context_menu)
+        self.table.itemSelectionChanged.connect(self.on_selection_changed)
+        self.table.itemDoubleClicked.connect(self.on_table_double_clicked)
         
         # Modern table styling
         self.table.setObjectName("modernTable")
@@ -598,7 +569,7 @@ class MainWindow(QMainWindow):
             # Process any remaining events
             QApplication.processEvents()
         except Exception as e:
-            print(f"Error stopping timers: {e}")
+            logger.error(f"Error stopping timers: {e}")
 
     # Override closeEvent to handle minimize to tray
     def closeEvent(self, event: QCloseEvent):
@@ -614,7 +585,7 @@ class MainWindow(QMainWindow):
                 )
         else:
             # Really exiting or in auto-quit mode
-            print("Application closing - performing cleanup...")
+            logger.info("Application closing - performing cleanup...")
             
             # Stop all timers
             self.stop_all_timers()
@@ -805,7 +776,7 @@ class MainWindow(QMainWindow):
         QMessageBox.about(
             self,
             "About MSFS Startup Manager",
-            f"<h3>MSFS Startup Manager v1.0.0-rc3</h3>"
+            f"<h3>MSFS Startup Manager v1.0.0-rc4</h3>"
             f"<p>A modern tool for managing Microsoft Flight Simulator addons.</p>"
             f"<p><b>Features:</b></p>"
             f"<ul>"
@@ -929,7 +900,7 @@ class MainWindow(QMainWindow):
 
     def update_process_monitoring(self):
         """Update process monitoring for all auto-close entries"""
-        print("\n=== Updating Process Monitoring ===")
+        logger.info("\n=== Updating Process Monitoring ===")
         
         # Clear current monitoring
         for addon_name in list(self.running_addons.keys()):
@@ -945,13 +916,13 @@ class MainWindow(QMainWindow):
                     'path': entry.path,
                     'auto_close': True
                 }
-                print(f"Added to monitoring: {entry.name} -> {entry.path}")
+                logger.info(f"Added to monitoring: {entry.name} -> {entry.path}")
             elif entry.auto_close and entry.enabled:
-                print(f"WARNING: Auto-close entry path does not exist: {entry.name} -> {entry.path}")
+                logger.warning(f"WARNING: Auto-close entry path does not exist: {entry.name} -> {entry.path}")
             elif entry.auto_close and not entry.enabled:
-                print(f"Skipping disabled auto-close entry: {entry.name}")
+                logger.info(f"Skipping disabled auto-close entry: {entry.name}")
         
-        print("=== Process Monitoring Updated ===\n")
+        logger.info("=== Process Monitoring Updated ===\n")
 
     # -------------------------
     # Table Handling
@@ -959,6 +930,8 @@ class MainWindow(QMainWindow):
     def populate_table(self):
         self.table.blockSignals(True)
         self.table.setRowCount(len(self.manager.entries))
+
+        generic_icon = self.style().standardIcon(QStyle.SP_FileIcon)
         
         for row, entry in enumerate(self.manager.entries):
             # Enabled checkbox
@@ -968,8 +941,13 @@ class MainWindow(QMainWindow):
             enabled_item.setTextAlignment(Qt.AlignCenter)
             self.table.setItem(row, 0, enabled_item)
             
-            # Name
+            # Name (with real executable icon when the file exists)
             name_item = QTableWidgetItem(entry.name)
+            if entry.path and os.path.exists(entry.path):
+                name_item.setIcon(self.icon_provider.icon(QFileInfo(entry.path)))
+            else:
+                name_item.setIcon(generic_icon)
+                name_item.setToolTip("Executable not found at the configured path")
             name_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
             self.table.setItem(row, 1, name_item)
             
@@ -994,6 +972,31 @@ class MainWindow(QMainWindow):
         
         self.table.blockSignals(False)
         self.update_status()
+        self.on_selection_changed()  # keep toolbar actions in sync after a reload
+
+    def on_selection_changed(self):
+        """Enable/disable Modify, Remove, and Run based on whether a row is selected."""
+        has_selection = bool(self.table.selectionModel().selectedRows())
+        self.modify_action.setEnabled(has_selection)
+        self.remove_action.setEnabled(has_selection)
+        self.run_action.setEnabled(has_selection)
+
+    def on_table_double_clicked(self, item):
+        """Double-clicking a row (outside the checkbox columns) opens Modify."""
+        if item.column() in (0, 4):
+            return  # checkboxes handle their own toggling
+        self.modify_entry()
+
+    def show_table_context_menu(self, pos):
+        """Right-click menu for the selected row: Run / Modify / Remove."""
+        if not self.table.selectionModel().selectedRows():
+            return
+        menu = QMenu(self)
+        menu.addAction("Run", self.run_entry)
+        menu.addAction("Modify", self.modify_entry)
+        menu.addSeparator()
+        menu.addAction("Remove", self.remove_entry)
+        menu.exec(self.table.viewport().mapToGlobal(pos))
 
     def on_item_changed(self, item):
         row = item.row()
@@ -1019,12 +1022,12 @@ class MainWindow(QMainWindow):
             entry = self.manager.entries[row]
             if auto_close and os.path.exists(entry.path):
                 self.process_monitor.add_addon_to_monitor(entry.name, entry.path)
-                print(f"Added {entry.name} to auto-close monitoring")
+                logger.info(f"Added {entry.name} to auto-close monitoring")
             elif not auto_close:
                 self.process_monitor.remove_addon_from_monitor(entry.name)
                 if entry.name in self.running_addons:
                     del self.running_addons[entry.name]
-                print(f"Removed {entry.name} from auto-close monitoring")
+                logger.info(f"Removed {entry.name} from auto-close monitoring")
         
         try:
             self.manager.save()
@@ -1055,7 +1058,7 @@ class MainWindow(QMainWindow):
             # Add to process monitoring if auto-close is enabled
             if auto_close and os.path.exists(path):
                 self.process_monitor.add_addon_to_monitor(name, path)
-                print(f"Added new entry {name} to auto-close monitoring")
+                logger.info(f"Added new entry {name} to auto-close monitoring")
             
             self.update_status("Entry added")
 
@@ -1090,7 +1093,7 @@ class MainWindow(QMainWindow):
             if entry.name in self.running_addons:
                 self.process_monitor.remove_addon_from_monitor(entry.name)
                 del self.running_addons[entry.name]
-                print(f"Removed {entry.name} from monitoring")
+                logger.info(f"Removed {entry.name} from monitoring")
             
             self.manager.remove_entry(index)
             self.populate_table()
@@ -1105,16 +1108,16 @@ class MainWindow(QMainWindow):
         index = rows[0].row()
         try:
             entry = self.manager.entries[index]
-            print(f"\n=== Running Entry ===")
-            print(f"Name: {entry.name}")
-            print(f"Path: {entry.path}")
-            print(f"Args: {entry.args}")
-            print(f"Auto-close: {entry.auto_close}")
+            logger.info(f"\n=== Running Entry ===")
+            logger.info(f"Name: {entry.name}")
+            logger.info(f"Path: {entry.path}")
+            logger.info(f"Args: {entry.args}")
+            logger.info(f"Auto-close: {entry.auto_close}")
             
             process = self.manager.execute_entry(index)
             
             if process:
-                print(f"Process started with PID: {process.pid}")
+                logger.info(f"Process started with PID: {process.pid}")
                 
                 if entry.auto_close:
                     # Track this process for auto-closing
@@ -1124,7 +1127,7 @@ class MainWindow(QMainWindow):
                         'path': entry.path,
                         'auto_close': True
                     }
-                    print(f"Added to auto-close monitoring: {entry.name} (PID: {process.pid})")
+                    logger.info(f"Added to auto-close monitoring: {entry.name} (PID: {process.pid})")
                 
                 self.update_status(f"Launched {entry.name}")
                 
@@ -1136,13 +1139,13 @@ class MainWindow(QMainWindow):
                         QSystemTrayIcon.Information
                     )
             else:
-                print("Failed to start process")
+                logger.error("Failed to start process")
                 self.update_status(f"Failed to launch {entry.name}")
                 
-            print("=== End Running Entry ===\n")
+            logger.info("=== End Running Entry ===\n")
             
         except Exception as e:
-            print(f"Error running entry: {e}")
+            logger.error(f"Error running entry: {e}")
             QMessageBox.critical(self, "Error", str(e))
 
     def modify_entry(self):
@@ -1184,7 +1187,7 @@ class MainWindow(QMainWindow):
             # Add new monitoring if auto-close is enabled
             if auto_close and os.path.exists(path):
                 self.process_monitor.add_addon_to_monitor(name, path)
-                print(f"Updated monitoring for {name}")
+                logger.info(f"Updated monitoring for {name}")
             
             self.populate_table()
             self.update_status("Entry modified")
@@ -1255,10 +1258,10 @@ class MainWindow(QMainWindow):
     # -------------------------
     def on_simulator_stopped(self, sim_name):
         """Called when the simulator process stops"""
-        print(f"\n=== Simulator Stopped Event ===")
-        print(f"Simulator: {sim_name}")
-        print(f"Auto-quit after autoclose: {self.auto_quit_after_autoclose}")
-        print(f"Running in background: {self.start_hidden}")
+        logger.info(f"\n=== Simulator Stopped Event ===")
+        logger.info(f"Simulator: {sim_name}")
+        logger.info(f"Auto-quit after autoclose: {self.auto_quit_after_autoclose}")
+        logger.info(f"Running in background: {self.start_hidden}")
         
         # Debug current state
         self.process_monitor.debug_status()
@@ -1268,15 +1271,15 @@ class MainWindow(QMainWindow):
         for entry in self.manager.entries:
             if entry.auto_close and entry.enabled:
                 auto_close_entries.append(entry)
-                print(f"Auto-close entry found: {entry.name} -> {entry.path}")
+                logger.info(f"Auto-close entry found: {entry.name} -> {entry.path}")
         
         if not auto_close_entries:
-            print("No auto-close entries found")
+            logger.info("No auto-close entries found")
             self.update_status(f"Simulator stopped ({sim_name}) - No auto-close addons")
             
             # If no auto-close entries but auto-quit is enabled and running in background, quit
             if self.auto_quit_after_autoclose and self.start_hidden:
-                print("No auto-close entries, but auto-quit enabled - exiting application")
+                logger.info("No auto-close entries, but auto-quit enabled - exiting application")
                 timer = QTimer()
                 timer.setSingleShot(True)
                 timer.timeout.connect(self.exit_application)
@@ -1291,29 +1294,29 @@ class MainWindow(QMainWindow):
         for entry in auto_close_entries:
             addon_name = entry.name
             process_count = self.process_monitor.get_addon_process_count(addon_name)
-            print(f"Checking {addon_name}: {process_count} running processes")
+            logger.info(f"Checking {addon_name}: {process_count} running processes")
             
             if process_count > 0:
                 try:
                     terminated = self.process_monitor.terminate_addon_processes(addon_name)
                     total_terminated += terminated
-                    print(f"Terminated {terminated} process(es) for {addon_name}")
+                    logger.info(f"Terminated {terminated} process(es) for {addon_name}")
                 except Exception as e:
-                    print(f"Error terminating {addon_name}: {e}")
+                    logger.error(f"Error terminating {addon_name}: {e}")
         
         # Also try to terminate any other running addon processes
         additional_terminated = self.process_monitor.terminate_all_addon_processes()
         if additional_terminated > total_terminated:
-            print(f"Terminated {additional_terminated - total_terminated} additional processes")
+            logger.info(f"Terminated {additional_terminated - total_terminated} additional processes")
             total_terminated = additional_terminated
         
         # Update status
         if total_terminated > 0:
             status_message = f"Simulator stopped - Auto-closed {total_terminated} addon(s)"
-            print(f"SUCCESS: {status_message}")
+            logger.info(f"SUCCESS: {status_message}")
         else:
             status_message = f"Simulator stopped ({sim_name}) - No addons to close"
-            print(f"NO ACTION: {status_message}")
+            logger.info(f"NO ACTION: {status_message}")
         
         self.update_status(status_message)
         
@@ -1341,7 +1344,7 @@ class MainWindow(QMainWindow):
         
         # Auto-quit functionality - only if running in background mode and auto-quit is enabled
         if self.auto_quit_after_autoclose and self.start_hidden:
-            print("Auto-quit after autoclose is enabled - scheduling application exit")
+            logger.info("Auto-quit after autoclose is enabled - scheduling application exit")
             
             # Wait a few seconds to allow user to see the notification and for processes to fully terminate
             timer = QTimer()
@@ -1350,11 +1353,11 @@ class MainWindow(QMainWindow):
             timer.start(5000)  # 5 second delay
             self.active_timers.append(timer)
         
-        print("=== End Simulator Stopped Event ===\n")
+        logger.info("=== End Simulator Stopped Event ===\n")
     
     def delayed_auto_quit(self):
         """Perform delayed auto-quit after auto-close operations"""
-        print("\n=== Delayed Auto-Quit ===")
+        logger.info("\n=== Delayed Auto-Quit ===")
         
         # Double-check that no auto-close processes are still running
         remaining_processes = 0
@@ -1363,10 +1366,10 @@ class MainWindow(QMainWindow):
                 count = self.process_monitor.get_addon_process_count(entry.name)
                 remaining_processes += count
                 if count > 0:
-                    print(f"Warning: {entry.name} still has {count} running processes")
+                    logger.warning(f"Warning: {entry.name} still has {count} running processes")
         
         if remaining_processes > 0:
-            print(f"Warning: {remaining_processes} auto-close processes still running, extending delay...")
+            logger.warning(f"Warning: {remaining_processes} auto-close processes still running, extending delay...")
             # Try again in 3 more seconds
             timer = QTimer()
             timer.setSingleShot(True)
@@ -1375,7 +1378,7 @@ class MainWindow(QMainWindow):
             self.active_timers.append(timer)
             return
         
-        print("All auto-close processes terminated, exiting application...")
+        logger.info("All auto-close processes terminated, exiting application...")
         
         # Show final tray notification
         if self.tray_manager.is_visible():
@@ -1392,11 +1395,11 @@ class MainWindow(QMainWindow):
         timer.timeout.connect(self.exit_application)
         timer.start(1000)
         self.active_timers.append(timer)
-        print("=== End Delayed Auto-Quit ===\n")
+        logger.info("=== End Delayed Auto-Quit ===\n")
     
     def on_addon_started(self, addon_name, pid):
         """Called when an addon process starts"""
-        print(f"Addon process started: {addon_name} (PID: {pid})")
+        logger.info(f"Addon process started: {addon_name} (PID: {pid})")
         # Update our tracking
         if addon_name not in self.running_addons:
             # Find the entry to get the path
@@ -1411,31 +1414,31 @@ class MainWindow(QMainWindow):
 
     def on_addon_stopped(self, addon_name, pid):
         """Called when an addon process stops"""
-        print(f"Addon process stopped: {addon_name} (PID: {pid})")
+        logger.info(f"Addon process stopped: {addon_name} (PID: {pid})")
 
     def debug_auto_close_status(self):
         """Debug method to check auto-close status"""
-        print("\n=== Debug Auto-Close Status ===")
-        print(f"Process monitor active: {self.process_monitor.monitoring}")
-        print(f"Simulator running: {self.process_monitor.is_simulator_running()}")
+        logger.info("\n=== Debug Auto-Close Status ===")
+        logger.info(f"Process monitor active: {self.process_monitor.monitoring}")
+        logger.info(f"Simulator running: {self.process_monitor.is_simulator_running()}")
         
-        print("Auto-close entries:")
+        logger.info("Auto-close entries:")
         for i, entry in enumerate(self.manager.entries):
             if entry.auto_close:
                 exists = os.path.exists(entry.path)
                 process_count = self.process_monitor.get_addon_process_count(entry.name)
-                print(f"  {i}: {entry.name}")
-                print(f"      Path: {entry.path}")
-                print(f"      Enabled: {entry.enabled}")
-                print(f"      Path exists: {exists}")
-                print(f"      Running processes: {process_count}")
+                logger.info(f"  {i}: {entry.name}")
+                logger.info(f"      Path: {entry.path}")
+                logger.info(f"      Enabled: {entry.enabled}")
+                logger.info(f"      Path exists: {exists}")
+                logger.info(f"      Running processes: {process_count}")
         
-        print("Tracked addons:")
+        logger.info("Tracked addons:")
         for name, info in self.running_addons.items():
-            print(f"  {name}: {info}")
+            logger.info(f"  {name}: {info}")
         
         self.process_monitor.debug_status()
-        print("=== End Debug ===\n")
+        logger.info("=== End Debug ===\n")
 
     def add_self_to_startup(self):
         """Add this application to exe.xml for automatic startup with simulator"""
@@ -1681,24 +1684,24 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to duplicate preset: {str(e)}")
 
-    def get_vs_dark_stylesheet(self):
-        """Visual Studio Dark theme colors"""
+    def get_light_stylesheet(self):
+        """Clean light theme, similar to classic Windows addon-manager tools"""
         return """
         QMainWindow {
-            background-color: #1e1e1e;
-            color: #cccccc;
+            background-color: #f3f4f6;
+            color: #202124;
             font-family: 'Segoe UI', Consolas, 'Courier New', monospace;
         }
         
         QWidget {
-            background-color: transparent;
-            color: #cccccc;
+            background-color: #f3f4f6;
+            color: #202124;
         }
         
         QMenuBar {
-            background-color: #2d2d30;
-            color: #cccccc;
-            border-bottom: 1px solid #3e3e42;
+            background-color: #eef0f3;
+            color: #202124;
+            border-bottom: 1px solid #d5d8dc;
             padding: 2px;
         }
         
@@ -1708,61 +1711,99 @@ class MainWindow(QMainWindow):
         }
         
         QMenuBar::item:selected {
-            background-color: #3e3e40;
+            background-color: #dde5f0;
         }
         
         QMenu {
-            background-color: #1b1b1c;
-            color: #cccccc;
-            border: 1px solid #3e3e42;
+            background-color: #ffffff;
+            color: #202124;
+            border: 1px solid #d5d8dc;
         }
         
         QMenu::item {
             padding: 6px 20px;
-            border-bottom: 1px solid #2d2d30;
+            border-bottom: 1px solid #f0f1f3;
         }
         
         QMenu::item:selected {
-            background-color: #094771;
+            background-color: #1e88e5;
             color: #ffffff;
+        }
+
+        QToolBar#mainToolbar {
+            background-color: #eef0f3;
+            border-bottom: 1px solid #d5d8dc;
+            padding: 4px 6px;
+            spacing: 4px;
+        }
+
+        QToolBar#mainToolbar QToolButton {
+            background-color: transparent;
+            border: 1px solid transparent;
+            border-radius: 4px;
+            padding: 4px 8px;
+            color: #202124;
+        }
+
+        QToolBar#mainToolbar QToolButton:hover {
+            background-color: #dde5f0;
+            border-color: #b7c6dc;
+        }
+
+        QToolBar#mainToolbar QToolButton:pressed {
+            background-color: #c7dcf5;
+        }
+
+        QToolBar#mainToolbar QToolButton:disabled {
+            color: #9a9ea3;
+        }
+
+        QToolBar#mainToolbar QToolButton#quitToolButton:hover {
+            background-color: #fdecea;
+            border-color: #f3b3ac;
+            color: #c62828;
+        }
+
+        QToolBar#mainToolbar QToolButton#quitToolButton:pressed {
+            background-color: #f8c9c2;
         }
         
         QLabel#mainTitle {
-            font-size: 28px;
+            font-size: 22px;
             font-weight: bold;
-            color: #ffffff;
-            margin-bottom: 8px;
+            color: #14202e;
+            margin-bottom: 4px;
         }
         
         QLabel#subtitle {
             font-size: 14px;
-            color: #9cdcfe;
+            color: #1e6fb8;
             margin-bottom: 16px;
         }
         
         QLabel#sectionTitle {
             font-size: 16px;
             font-weight: 600;
-            color: #dcdcaa;
+            color: #7a5c00;
             margin-right: 20px;
         }
         
         QLabel#fieldLabel {
-            font-size: 14px;
-            color: #9cdcfe;
-            margin-right: 8px;
+            font-size: 13px;
+            color: #1e6fb8;
+            margin-right: 6px;
         }
         
         QLabel#statusLabel {
             font-size: 12px;
-            color: #808080;
+            color: #5f6368;
             padding: 8px 0px;
         }
         
         QPushButton#primaryButton {
-            background-color: #0e639c;
+            background-color: #1e88e5;
             color: #ffffff;
-            border: 1px solid #1177bb;
+            border: 1px solid #1a76c9;
             border-radius: 4px;
             padding: 8px 16px;
             font-size: 14px;
@@ -1770,68 +1811,68 @@ class MainWindow(QMainWindow):
         }
         
         QPushButton#primaryButton:hover {
-            background-color: #1177bb;
-            border-color: #1e88cc;
+            background-color: #2c94ee;
+            border-color: #1e88e5;
         }
         
         QPushButton#primaryButton:pressed {
-            background-color: #0d5a87;
+            background-color: #1670bd;
         }
         
         QPushButton#secondaryButton {
-            background-color: #3c3c3c;
-            color: #cccccc;
-            border: 1px solid #555555;
+            background-color: #ffffff;
+            color: #202124;
+            border: 1px solid #c7cbd1;
             border-radius: 4px;
             padding: 8px 16px;
             font-size: 14px;
         }
         
         QPushButton#secondaryButton:hover {
-            background-color: #464647;
-            border-color: #6e6e6e;
+            background-color: #eef0f3;
+            border-color: #9aa0a6;
         }
         
         QPushButton#secondaryButton:pressed {
-            background-color: #2a2a2a;
+            background-color: #dde5f0;
         }
         
         QComboBox {
-            background-color: #3c3c3c;
-            color: #cccccc;
-            border: 1px solid #555555;
+            background-color: #ffffff;
+            color: #202124;
+            border: 1px solid #c7cbd1;
             border-radius: 4px;
             padding: 6px 12px;
-            font-size: 14px;
-            min-height: 20px;
+            font-size: 13px;
+            min-height: 18px;
         }
         
         QComboBox:hover {
-            border-color: #0e639c;
+            border-color: #1e88e5;
         }
         
         QComboBox:focus {
-            border-color: #007acc;
+            border-color: #1e88e5;
         }
         
         QComboBox::drop-down {
             subcontrol-origin: padding;
             subcontrol-position: top right;
             width: 20px;
-            border-left: 1px solid #555555;
+            border-left: 1px solid #c7cbd1;
         }
         
         QComboBox::down-arrow {
             width: 12px;
             height: 12px;
-            background-color: #cccccc;
+            background-color: #5f6368;
         }
         
         QComboBox QAbstractItemView {
-            background-color: #1e1e1e;
-            color: #cccccc;
-            border: 1px solid #555555;
-            selection-background-color: #094771;
+            background-color: #ffffff;
+            color: #202124;
+            border: 1px solid #c7cbd1;
+            selection-background-color: #1e88e5;
             selection-color: #ffffff;
             outline: none;
         }
@@ -1842,68 +1883,68 @@ class MainWindow(QMainWindow):
         }
         
         QComboBox QAbstractItemView::item:hover {
-            background-color: #2a2d2e;
+            background-color: #dde5f0;
         }
         
         QTableWidget#modernTable {
-            background-color: #252526;
-            gridline-color: #3e3e42;
-            border: 1px solid #3e3e42;
-            alternate-background-color: #2a2a2b;
-            selection-background-color: #094771;
+            background-color: #ffffff;
+            gridline-color: #e3e5e8;
+            border: 1px solid #d5d8dc;
+            alternate-background-color: #f6f7f9;
+            selection-background-color: #1e88e5;
             selection-color: #ffffff;
         }
         
         QTableWidget#modernTable::item {
             padding: 8px;
             border: none;
-            color: #cccccc;
+            color: #202124;
         }
         
         QTableWidget#modernTable::item:selected {
-            background-color: #094771;
+            background-color: #1e88e5;
             color: #ffffff;
         }
         
         QTableWidget#modernTable::item:alternate {
-            background-color: #2a2a2b;
+            background-color: #f6f7f9;
         }
         
         QHeaderView::section {
-            background-color: #2d2d30;
-            color: #cccccc;
+            background-color: #eef0f3;
+            color: #202124;
             border: none;
-            border-right: 1px solid #3e3e42;
-            border-bottom: 1px solid #3e3e42;
+            border-right: 1px solid #d5d8dc;
+            border-bottom: 1px solid #d5d8dc;
             padding: 10px 8px;
             font-weight: 600;
             font-size: 13px;
         }
         
         QHeaderView::section:hover {
-            background-color: #3e3e40;
+            background-color: #dde5f0;
         }
         
         QFrame#separator {
-            background-color: #3e3e42;
+            background-color: #d5d8dc;
             max-height: 1px;
             margin: 16px 0px;
         }
         
         QScrollBar:vertical {
-            background-color: #2b2b2c;
+            background-color: #f0f1f3;
             width: 14px;
             border: none;
         }
         
         QScrollBar::handle:vertical {
-            background-color: #555556;
+            background-color: #c2c6cb;
             border: none;
             min-height: 20px;
         }
         
         QScrollBar::handle:vertical:hover {
-            background-color: #686868;
+            background-color: #a9adb3;
         }
         
         QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
@@ -1911,19 +1952,19 @@ class MainWindow(QMainWindow):
         }
         
         QScrollBar:horizontal {
-            background-color: #2b2b2c;
+            background-color: #f0f1f3;
             height: 14px;
             border: none;
         }
         
         QScrollBar::handle:horizontal {
-            background-color: #555556;
+            background-color: #c2c6cb;
             border: none;
             min-width: 20px;
         }
         
         QScrollBar::handle:horizontal:hover {
-            background-color: #686868;
+            background-color: #a9adb3;
         }
         
         QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
@@ -1931,14 +1972,14 @@ class MainWindow(QMainWindow):
         }
         
         QMessageBox {
-            background-color: #2d2d30;
-            color: #cccccc;
+            background-color: #ffffff;
+            color: #202124;
         }
         
         QMessageBox QPushButton {
-            background-color: #0e639c;
+            background-color: #1e88e5;
             color: #ffffff;
-            border: 1px solid #1177bb;
+            border: 1px solid #1a76c9;
             border-radius: 4px;
             padding: 6px 16px;
             margin: 4px;
@@ -1946,38 +1987,38 @@ class MainWindow(QMainWindow):
         }
         
         QMessageBox QPushButton:hover {
-            background-color: #1177bb;
+            background-color: #2c94ee;
         }
         
         QMessageBox QPushButton:pressed {
-            background-color: #0d5a87;
+            background-color: #1670bd;
         }
         
         QDialog {
-            background-color: #2d2d30;
-            color: #cccccc;
+            background-color: #ffffff;
+            color: #202124;
         }
         
         QLineEdit {
-            background-color: #3c3c3c;
-            color: #cccccc;
-            border: 1px solid #555555;
+            background-color: #ffffff;
+            color: #202124;
+            border: 1px solid #c7cbd1;
             border-radius: 4px;
             padding: 6px 8px;
             font-size: 14px;
         }
         
         QLineEdit:focus {
-            border-color: #007acc;
-            background-color: #404040;
+            border-color: #1e88e5;
+            background-color: #ffffff;
         }
         
         QLineEdit:hover {
-            border-color: #6e6e6e;
+            border-color: #9aa0a6;
         }
         
         QCheckBox {
-            color: #cccccc;
+            color: #202124;
             font-size: 14px;
         }
         
@@ -1987,29 +2028,61 @@ class MainWindow(QMainWindow):
         }
         
         QCheckBox::indicator:unchecked {
-            background-color: #3c3c3c;
-            border: 1px solid #555555;
+            background-color: #ffffff;
+            border: 1px solid #c7cbd1;
         }
         
         QCheckBox::indicator:unchecked:hover {
-            border-color: #0e639c;
+            border-color: #1e88e5;
         }
         
         QCheckBox::indicator:checked {
-            background-color: #007acc;
-            border: 1px solid #007acc;
+            background-color: #1e88e5;
+            border: 1px solid #1a76c9;
             image: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTIiIGhlaWdodD0iOSIgdmlld0JveD0iMCAwIDEyIDkiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxwYXRoIGQ9Ik0xMC41IDFMNCAxLjVMMSAzLjUiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+Cjwvc3ZnPgo=);
         }
         
         QCheckBox::indicator:checked:hover {
-            background-color: #1177bb;
-            border-color: #1177bb;
+            background-color: #2c94ee;
+            border-color: #2c94ee;
+        }
+
+        /* The Enabled / Auto-Close columns in the table use QTableWidgetItem
+           checkboxes, which Qt renders via a separate ::indicator subcontrol
+           on the view itself rather than QCheckBox::indicator above. Without
+           this block they fall back to bare native rendering, which makes
+           checked and unchecked look almost identical. */
+        QTableWidget::indicator {
+            width: 16px;
+            height: 16px;
+        }
+
+        QTableWidget::indicator:unchecked {
+            background-color: #ffffff;
+            border: 1px solid #9aa0a6;
+            border-radius: 3px;
+        }
+
+        QTableWidget::indicator:unchecked:hover {
+            border-color: #1e88e5;
+        }
+
+        QTableWidget::indicator:checked {
+            background-color: #1e88e5;
+            border: 1px solid #1a76c9;
+            border-radius: 3px;
+            image: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTIiIGhlaWdodD0iOSIgdmlld0JveD0iMCAwIDEyIDkiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxwYXRoIGQ9Ik0xMC41IDFMNCAxLjVMMSAzLjUiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+Cjwvc3ZnPgo=);
+        }
+
+        QTableWidget::indicator:checked:hover {
+            background-color: #2c94ee;
+            border-color: #2c94ee;
         }
         
         QToolTip {
-            background-color: #2d2d30;
-            color: #cccccc;
-            border: 1px solid #555555;
+            background-color: #ffffff;
+            color: #202124;
+            border: 1px solid #c7cbd1;
             padding: 4px;
         }
         """
@@ -2043,11 +2116,18 @@ def parse_arguments():
 
 
 def main():
+    # Set up logging first, before anything else. This must happen before
+    # QApplication is created so that any startup issues (and, in a frozen
+    # --windowed build, the None stdout/stderr redirect) are captured from
+    # the very first line.
+    from logging_config import setup_logging
+    setup_logging()
+
     args = parse_arguments()
     
     # Validate argument combinations
     if args.auto_quit_after_autoclose and not args.start_background:
-        print("Warning: --auto-quit-after-autoclose requires --start-background, enabling background mode")
+        logger.warning("Warning: --auto-quit-after-autoclose requires --start-background, enabling background mode")
         args.start_background = True
     
     app = QApplication(sys.argv)
@@ -2063,27 +2143,27 @@ def main():
     # Handle command line arguments for running instance
     if args.exit:
         if instance_manager.send_shutdown_signal():
-            print("Sent shutdown signal to running instance")
+            logger.info("Sent shutdown signal to running instance")
             sys.exit(0)
         else:
-            print("No running instance found")
+            logger.info("No running instance found")
             sys.exit(1)
     
     if args.show:
         if instance_manager.try_connect_to_existing():
-            print("Showed existing instance")
+            logger.info("Showed existing instance")
             sys.exit(0)
         else:
-            print("No running instance found, starting new instance...")
+            logger.info("No running instance found, starting new instance...")
     
     # Check if another instance is already running
     if instance_manager.try_connect_to_existing():
-        print("Another instance is already running. Showing existing window...")
+        logger.info("Another instance is already running. Showing existing window...")
         sys.exit(0)
     
     # We are the primary instance
     if not instance_manager.start_server():
-        print("Failed to start single instance server")
+        logger.error("Failed to start single instance server")
         sys.exit(1)
     
     # Create main window with auto-quit option
@@ -2099,7 +2179,7 @@ def main():
     
     # Cleanup on application exit
     def cleanup_on_exit():
-        print("Application aboutToQuit - final cleanup")
+        logger.info("Application aboutToQuit - final cleanup")
         try:
             instance_manager.cleanup()
             # Force any remaining cleanup
@@ -2108,7 +2188,7 @@ def main():
             if hasattr(window, 'stop_all_timers'):
                 window.stop_all_timers()
         except Exception as e:
-            print(f"Error during final cleanup: {e}")
+            logger.error(f"Error during final cleanup: {e}")
     
     app.aboutToQuit.connect(cleanup_on_exit)
     
@@ -2116,18 +2196,18 @@ def main():
     if not start_hidden:
         window.show()
     elif args.auto_quit_after_autoclose:
-        print("Started in background mode with auto-quit after autoclose enabled")
+        logger.info("Started in background mode with auto-quit after autoclose enabled")
     
     # Start event loop
     try:
         exit_code = app.exec()
-        print(f"Application exec finished with code: {exit_code}")
+        logger.info(f"Application exec finished with code: {exit_code}")
         sys.exit(exit_code)
     except KeyboardInterrupt:
-        print("Keyboard interrupt - forcing exit")
+        logger.info("Keyboard interrupt - forcing exit")
         sys.exit(1)
     except Exception as e:
-        print(f"Unexpected error: {e}")
+        logger.error(f"Unexpected error: {e}")
         sys.exit(1)
 
 

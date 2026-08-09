@@ -1,5 +1,7 @@
 import os
 import subprocess
+import shlex
+import tempfile
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
 import json
@@ -54,15 +56,10 @@ class ExeXmlManager:
         # Load auto-close settings from separate file
         self._load_auto_close_settings()
         
-        # Debug: Print XML structure
-        print(f"Root tag: {self.root.tag}")
-        print("All child elements:")
-        for child in self.root:
-            print(f"  - {child.tag}")
-            for grandchild in child:
-                print(f"    - {grandchild.tag}")
-        
         self.parse_entries()
+        # Prune auto-close settings for entries that no longer exist,
+        # so the sidecar file doesn't grow forever over months of edits.
+        self._prune_auto_close_settings()
 
     def _load_auto_close_settings(self):
         """Load auto-close settings from a separate JSON file"""
@@ -85,15 +82,24 @@ class ExeXmlManager:
             self.auto_close_settings = {}
 
     def _save_auto_close_settings(self):
-        """Save auto-close settings to separate JSON file"""
+        """Save auto-close settings to separate JSON file (atomic)"""
         if not self.auto_close_file:
             return
-            
-        try:
-            with open(self.auto_close_file, 'w', encoding='utf-8') as f:
-                json.dump(self.auto_close_settings, f, indent=2)
-        except Exception as e:
-            print(f"Error saving auto-close settings: {e}")
+        self._atomic_write_text(
+            self.auto_close_file,
+            json.dumps(self.auto_close_settings, indent=2),
+        )
+
+    def _prune_auto_close_settings(self):
+        """Remove auto-close entries whose (name|path) no longer matches any entry."""
+        if not self.auto_close_settings:
+            return
+        live_ids = {e._generate_entry_id() for e in self.entries}
+        stale_ids = [eid for eid in self.auto_close_settings if eid not in live_ids]
+        if stale_ids:
+            for eid in stale_ids:
+                del self.auto_close_settings[eid]
+            self._save_auto_close_settings()
 
     def load_preset(self, preset_path):
         """Load a preset file (JSON format) and apply it to current exe.xml"""
@@ -126,7 +132,7 @@ class ExeXmlManager:
             raise ValueError(f"Invalid preset file format: {e}")
 
     def save_preset(self, preset_path):
-        """Save current entries as a preset file"""
+        """Save current entries as a preset file (atomic)"""
         preset_data = {
             "name": os.path.basename(preset_path).replace(".json", ""),
             "entries": []
@@ -141,23 +147,11 @@ class ExeXmlManager:
                 "auto_close": entry.auto_close
             })
         
-        with open(preset_path, 'w', encoding='utf-8') as f:
-            json.dump(preset_data, f, indent=2)
+        self._atomic_write_text(preset_path, json.dumps(preset_data, indent=2))
 
     def parse_entries(self):
         self.entries = []
         
-        # MSFS exe.xml typically has this structure:
-        # <SimBase.Document ...>
-        #   <Launch.Addon>
-        #     <Name>...</Name>
-        #     <Path>...</Path>
-        #     <CommandLine>...</CommandLine>
-        #     <Disabled>...</Disabled>
-        #   </Launch.Addon>
-        # </SimBase.Document>
-        
-        # Try different possible tag patterns for MSFS exe.xml
         possible_tags = [
             "Launch.Addon",           # Direct children
             ".//Launch.Addon",        # Anywhere in document
@@ -167,46 +161,88 @@ class ExeXmlManager:
         
         for tag_pattern in possible_tags:
             elements = self.root.findall(tag_pattern)
-            print(f"Found {len(elements)} elements with pattern '{tag_pattern}'")
             if elements:
                 for elem in elements:
-                    print(f"  Element: {elem.tag}")
-                    print(f"    Name: {elem.findtext('Name', 'N/A')}")
-                    print(f"    Path: {elem.findtext('Path', 'N/A')}")
-                    print(f"    CommandLine: {elem.findtext('CommandLine', 'N/A')}")
-                    print(f"    Args: {elem.findtext('Args', 'N/A')}")
                     self.entries.append(AppEntry(elem, self.auto_close_settings))
                 break  # Use the first pattern that finds elements
-        
-        print(f"Total entries loaded: {len(self.entries)}")
+
+    # -------------------------
+    # Atomic file writing helpers
+    # -------------------------
+    def _atomic_write_bytes(self, path, write_func):
+        """
+        Write to a temp file in the same directory, fsync, then atomically
+        replace the target file. write_func(file_obj) does the actual writing.
+        This avoids ever leaving a truncated/corrupt file behind if the
+        process dies mid-write (crash, AV lock, power loss, etc).
+        """
+        dir_name = os.path.dirname(os.path.abspath(path)) or "."
+        os.makedirs(dir_name, exist_ok=True)
+
+        fd, tmp_path = tempfile.mkstemp(dir=dir_name, prefix=".tmp_", suffix=".xml")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                write_func(f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, path)  # atomic on Windows and POSIX
+        except Exception:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
+            raise
+
+    def _atomic_write_text(self, path, text, encoding="utf-8"):
+        def _write(f):
+            f.write(text.encode(encoding))
+        self._atomic_write_bytes(path, _write)
+
+    def _pretty_print_xml(self, root):
+        """
+        Reformat the tree in place so it's human-readable, not a single line.
+        Prefers the standard library's ET.indent (Python 3.9+, well tested);
+        falls back to a manual indenter on older Pythons.
+        """
+        if hasattr(ET, "indent"):
+            ET.indent(root, space="  ")
+        else:
+            self._manual_indent_xml(root)
+
+    def _manual_indent_xml(self, elem, level=0):
+        """Fallback pretty-printer for Python < 3.9."""
+        indent = "\n" + level * "  "
+        children = list(elem)
+        if children:
+            if not elem.text or not elem.text.strip():
+                elem.text = indent + "  "
+            for child in children:
+                self._manual_indent_xml(child, level + 1)
+            last = children[-1]
+            if not last.tail or not last.tail.strip():
+                last.tail = indent
+            for child in children[:-1]:
+                if not child.tail or not child.tail.strip():
+                    child.tail = indent + "  "
+        if level and (not elem.tail or not elem.tail.strip()):
+            elem.tail = indent
 
     def save(self):
         if self.tree is not None and self.filepath:
-            # Format the XML with proper indentation
-            self._indent_xml(self.root)
-            self.tree.write(self.filepath, encoding="utf-8", xml_declaration=True)
-            
-            # Save auto-close settings separately
+            # Format the XML with proper indentation (never single-line)
+            self._pretty_print_xml(self.root)
+
+            def _write(f):
+                f.write(b"<?xml version='1.0' encoding='utf-8'?>\n")
+                self.tree.write(f, encoding="utf-8", xml_declaration=False)
+
+            self._atomic_write_bytes(self.filepath, _write)
+
+            # Save auto-close settings separately (also atomic)
             self._save_auto_close_settings()
-    
-    def _indent_xml(self, elem, level=0):
-        """Add proper indentation to XML elements"""
-        indent = "\n" + level * "  "
-        if len(elem):
-            if not elem.text or not elem.text.strip():
-                elem.text = indent + "  "
-            if not elem.tail or not elem.tail.strip():
-                elem.tail = indent
-            for child in elem:
-                self._indent_xml(child, level + 1)
-            if not child.tail or not child.tail.strip():
-                child.tail = indent
-        else:
-            if level and (not elem.tail or not elem.tail.strip()):
-                elem.tail = indent
 
     def add_entry(self, name, path, args, enabled=True, auto_close=False):
-        # Try to find the correct parent element or create the structure
         launch_parent = self.root.find(".//SimBase.Document")
         if launch_parent is None:
             launch_parent = self.root
@@ -218,7 +254,6 @@ class ExeXmlManager:
         ET.SubElement(addon, "Disabled").text = "False" if enabled else "True"
         launch_parent.append(addon)
         
-        # Store auto-close setting separately
         entry_id = hashlib.md5(f"{name}|{path}".encode()).hexdigest()
         self.auto_close_settings[entry_id] = auto_close
         
@@ -227,12 +262,10 @@ class ExeXmlManager:
     def remove_entry(self, index):
         entry = self.entries[index]
         
-        # Remove auto-close setting
         entry_id = entry._generate_entry_id()
         if entry_id in self.auto_close_settings:
             del self.auto_close_settings[entry_id]
         
-        # Instead of entry.elem.getparent(), use self.root (or the parent element you have)
         self.root.remove(entry.elem)
         del self.entries[index]
         self.save()
@@ -244,8 +277,12 @@ class ExeXmlManager:
         if not os.path.exists(entry.path):
             raise FileNotFoundError(f"Executable not found: {entry.path}")
         
-        # Launch the process and return the Popen object for tracking
-        process = subprocess.Popen([entry.path] + entry.args.split())
+        # shlex.split respects quoted arguments (e.g. paths with spaces),
+        # unlike the previous naive .split() on whitespace.
+        args = shlex.split(entry.args, posix=False) if entry.args else []
+        working_dir = os.path.dirname(entry.path) or None
+        
+        process = subprocess.Popen([entry.path] + args, cwd=working_dir)
         return process
 
     def set_enabled(self, index, enabled: bool):
@@ -259,15 +296,12 @@ class ExeXmlManager:
         self.parse_entries()
     
     def set_auto_close(self, index, auto_close: bool):
-        """Set auto-close setting for an entry"""
         if index < 0 or index >= len(self.entries):
             return
         
         entry = self.entries[index]
         entry_id = entry._generate_entry_id()
         self.auto_close_settings[entry_id] = auto_close
-        
-        # Update the entry object
         entry.auto_close = auto_close
     
     def modify_entry(self, index, name, path, args, enabled=True, auto_close=False):
@@ -277,7 +311,6 @@ class ExeXmlManager:
         entry = self.entries[index]
         old_entry_id = entry._generate_entry_id()
         
-        # Update XML elements
         entry.elem.find("Name").text = name
         entry.elem.find("Path").text = path
         cmd_elem = entry.elem.find("CommandLine")
@@ -291,14 +324,11 @@ class ExeXmlManager:
             disabled_elem = ET.SubElement(entry.elem, "Disabled")
         disabled_elem.text = "False" if enabled else "True"
         
-        # Handle auto-close setting change
         new_entry_id = hashlib.md5(f"{name}|{path}".encode()).hexdigest()
         
-        # Remove old auto-close setting if entry ID changed
         if old_entry_id != new_entry_id and old_entry_id in self.auto_close_settings:
             del self.auto_close_settings[old_entry_id]
         
-        # Set new auto-close setting
         self.auto_close_settings[new_entry_id] = auto_close
         
         self.parse_entries()

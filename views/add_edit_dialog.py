@@ -1,23 +1,27 @@
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLineEdit, QDialogButtonBox, 
+    QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit, QDialogButtonBox,
     QLabel, QCheckBox, QFileDialog, QPushButton, QFrame, QSpacerItem, QSizePolicy
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 import os
 
+from logging_config import get_logger
+
+logger = get_logger(__name__)
+
 
 class ModernLineEdit(QLineEdit):
     def __init__(self, placeholder=""):
         super().__init__()
         self.setPlaceholderText(placeholder)
-        self.setMinimumHeight(40)
+        self.setMinimumHeight(36)
 
 
 class ModernCheckBox(QCheckBox):
     def __init__(self, text):
         super().__init__(text)
-        self.setMinimumHeight(32)
+        self.setMinimumHeight(28)
 
 
 class AddEditDialog(QDialog):
@@ -25,13 +29,13 @@ class AddEditDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setModal(True)
-        self.setMinimumSize(500, 400)  # Increased height for auto-close checkbox
-        self.setStyleSheet(self.get_vs_dark_dialog_stylesheet())
+        self.setMinimumSize(460, 300)  # Tighter than the old stacked-label layout
+        self.setStyleSheet(self.get_light_dialog_stylesheet())
         
         # Main layout
         layout = QVBoxLayout(self)
-        layout.setSpacing(24)
-        layout.setContentsMargins(32, 32, 32, 32)
+        layout.setSpacing(16)
+        layout.setContentsMargins(24, 24, 24, 24)
         
         # Title
         title_label = QLabel(title)
@@ -43,7 +47,7 @@ class AddEditDialog(QDialog):
         layout.addLayout(form_layout)
         
         # Spacer
-        spacer = QSpacerItem(20, 20, QSizePolicy.Minimum, QSizePolicy.Expanding)
+        spacer = QSpacerItem(20, 12, QSizePolicy.Minimum, QSizePolicy.Expanding)
         layout.addItem(spacer)
         
         # Buttons
@@ -51,86 +55,70 @@ class AddEditDialog(QDialog):
         layout.addLayout(button_layout)
 
     def create_form(self):
-        layout = QVBoxLayout()
-        layout.setSpacing(20)
-        
+        form = QFormLayout()
+        form.setSpacing(10)
+        form.setLabelAlignment(Qt.AlignLeft)
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+
         # Name field
-        name_label = QLabel("Application Name")
-        name_label.setObjectName("fieldLabel")
         self.name_edit = ModernLineEdit("e.g., FSUIPC7, FSRealistic")
-        
-        layout.addWidget(name_label)
-        layout.addWidget(self.name_edit)
-        
+        form.addRow("Name", self.name_edit)
+
         # Path field with browse button
-        path_label = QLabel("Executable Path")
-        path_label.setObjectName("fieldLabel")
-        
-        path_layout = QHBoxLayout()
-        path_layout.setSpacing(8)
-        
+        path_row = QHBoxLayout()
+        path_row.setSpacing(8)
         self.path_edit = ModernLineEdit("C:\\Program Files\\...")
-        browse_btn = QPushButton("Browse...")
+        browse_btn = QPushButton("...")
         browse_btn.setObjectName("browseButton")
-        browse_btn.setMinimumHeight(40)
-        browse_btn.setMinimumWidth(80)
+        browse_btn.setFixedWidth(36)
+        browse_btn.setMinimumHeight(36)
         browse_btn.clicked.connect(self.browse_executable)
-        
-        path_layout.addWidget(self.path_edit)
-        path_layout.addWidget(browse_btn)
-        
-        layout.addWidget(path_label)
-        layout.addLayout(path_layout)
-        
+        path_row.addWidget(self.path_edit)
+        path_row.addWidget(browse_btn)
+        form.addRow("Path", path_row)
+
         # Arguments field
-        args_label = QLabel("Command Line Arguments")
-        args_label.setObjectName("fieldLabel")
         self.args_edit = ModernLineEdit("-auto, --silent (optional)")
-        
-        layout.addWidget(args_label)
-        layout.addWidget(self.args_edit)
-        
+        form.addRow("Arguments", self.args_edit)
+
         # Separator
         separator = QFrame()
         separator.setFrameShape(QFrame.HLine)
         separator.setObjectName("separator")
-        layout.addWidget(separator)
-        
+        form.addRow(separator)
+
         # Enabled checkbox
         self.enabled_check = ModernCheckBox("Enable this addon on startup")
         self.enabled_check.setChecked(True)
         self.enabled_check.setObjectName("enabledCheck")
-        layout.addWidget(self.enabled_check)
-        
-        # Auto-close checkbox (ADDED)
+        form.addRow("", self.enabled_check)
+
+        # Auto-close checkbox
         self.auto_close_check = ModernCheckBox("Auto-close when simulator stops")
         self.auto_close_check.setChecked(False)
         self.auto_close_check.setObjectName("autoCloseCheck")
         self.auto_close_check.setToolTip("Automatically close this addon when the simulator stops running")
-        layout.addWidget(self.auto_close_check)
-        
-        return layout
+        form.addRow("", self.auto_close_check)
+
+        return form
 
     def create_buttons(self):
         layout = QHBoxLayout()
         layout.setSpacing(12)
         
-        # Add spacer to right-align buttons
         spacer = QSpacerItem(40, 20, QSizePolicy.Expanding, QSizePolicy.Minimum)
         layout.addItem(spacer)
         
-        # Cancel button
         cancel_btn = QPushButton("Cancel")
         cancel_btn.setObjectName("cancelButton")
-        cancel_btn.setMinimumHeight(40)
-        cancel_btn.setMinimumWidth(100)
+        cancel_btn.setMinimumHeight(36)
+        cancel_btn.setMinimumWidth(90)
         cancel_btn.clicked.connect(self.reject)
         
-        # OK button
         ok_btn = QPushButton("Save")
         ok_btn.setObjectName("okButton")
-        ok_btn.setMinimumHeight(40)
-        ok_btn.setMinimumWidth(100)
+        ok_btn.setMinimumHeight(36)
+        ok_btn.setMinimumWidth(90)
         ok_btn.setDefault(True)
         ok_btn.clicked.connect(self.accept)
         
@@ -149,7 +137,6 @@ class AddEditDialog(QDialog):
         if file_path:
             self.path_edit.setText(file_path)
             
-            # Auto-detect name if the name field is empty or has placeholder text
             current_name = self.name_edit.text().strip()
             if not current_name or current_name == "e.g., FSUIPC7, FSRealistic":
                 detected_name = self.get_exe_display_name(file_path)
@@ -174,7 +161,6 @@ class AddEditDialog(QDialog):
                 for file_info in pe.FileInfo:
                     if hasattr(file_info, 'StringTable'):
                         for string_table in file_info.StringTable:
-                            # Look for ProductName first
                             for key, value in string_table.entries.items():
                                 key_str = key.decode('utf-8', errors='ignore')
                                 if key_str == 'ProductName':
@@ -183,7 +169,6 @@ class AddEditDialog(QDialog):
                                         pe.close()
                                         return product_name
                             
-                            # Then FileDescription
                             for key, value in string_table.entries.items():
                                 key_str = key.decode('utf-8', errors='ignore')
                                 if key_str == 'FileDescription':
@@ -192,13 +177,11 @@ class AddEditDialog(QDialog):
                                         pe.close()
                                         return file_desc
                             
-                            # Finally InternalName
                             for key, value in string_table.entries.items():
                                 key_str = key.decode('utf-8', errors='ignore')
                                 if key_str == 'InternalName':
                                     internal_name = value.decode('utf-8', errors='ignore').strip()
                                     if internal_name:
-                                        # Remove .exe extension if present
                                         if internal_name.lower().endswith('.exe'):
                                             internal_name = internal_name[:-4]
                                         pe.close()
@@ -207,10 +190,8 @@ class AddEditDialog(QDialog):
             pe.close()
             
         except ImportError:
-            # pefile not available
             pass
         except Exception:
-            # Error reading PE file
             pass
         
         # Method 2: Try using Windows PowerShell (Windows-specific, no extra dependencies)
@@ -218,7 +199,6 @@ class AddEditDialog(QDialog):
             import subprocess
             import json
             
-            # Use PowerShell to get file version info
             ps_command = f'''
             $version = [System.Diagnostics.FileVersionInfo]::GetVersionInfo("{file_path}")
             $result = @{{
@@ -239,15 +219,12 @@ class AddEditDialog(QDialog):
             if result.returncode == 0 and result.stdout.strip():
                 data = json.loads(result.stdout.strip())
                 
-                # Try ProductName first
                 if data.get('ProductName') and data['ProductName'].strip():
                     return data['ProductName'].strip()
                 
-                # Then FileDescription
                 if data.get('FileDescription') and data['FileDescription'].strip():
                     return data['FileDescription'].strip()
                 
-                # Finally InternalName
                 if data.get('InternalName') and data['InternalName'].strip():
                     name = data['InternalName'].strip()
                     if name.lower().endswith('.exe'):
@@ -255,26 +232,21 @@ class AddEditDialog(QDialog):
                     return name
                     
         except Exception:
-            # PowerShell method failed
             pass
         
         # Method 3: Fallback to filename without extension
         try:
             base_name = os.path.splitext(os.path.basename(file_path))[0]
             
-            # Clean up common patterns
-            # Remove version numbers like "v1.2.3" or "1.0"
             import re
             cleaned_name = re.sub(r'\s*v?\d+(\.\d+)*\s*$', '', base_name, flags=re.IGNORECASE)
             
-            # Remove common suffixes
             suffixes_to_remove = ['_setup', '_installer', '_x64', '_x86', '_win64', '_win32']
             for suffix in suffixes_to_remove:
                 if cleaned_name.lower().endswith(suffix.lower()):
                     cleaned_name = cleaned_name[:-len(suffix)]
                     break
             
-            # Capitalize first letter of each word for better presentation
             if cleaned_name:
                 return ' '.join(word.capitalize() for word in cleaned_name.replace('_', ' ').replace('-', ' ').split())
             else:
@@ -283,11 +255,9 @@ class AddEditDialog(QDialog):
         except Exception:
             pass
         
-        # If all else fails, return the filename
         return os.path.basename(file_path)
 
     def get_data(self):
-        # Returns 5 values including auto_close
         return (
             self.name_edit.text().strip(),
             self.path_edit.text().strip(),
@@ -296,176 +266,144 @@ class AddEditDialog(QDialog):
             self.auto_close_check.isChecked()
         )
 
-    def get_vs_dark_dialog_stylesheet(self):
-        """Visual Studio Dark theme for dialogs"""
+    def get_light_dialog_stylesheet(self):
+        """Light theme for dialogs, matching main.py's get_light_stylesheet()"""
         return """
         QDialog {
-            background-color: #2d2d30;
-            color: #cccccc;
+            background-color: #ffffff;
+            color: #202124;
             font-family: 'Segoe UI', Consolas, 'Courier New', monospace;
         }
         
         QLabel#dialogTitle {
-            font-size: 22px;
+            font-size: 18px;
             font-weight: bold;
-            color: #ffffff;
-            margin-bottom: 8px;
-        }
-        
-        QLabel#fieldLabel {
-            font-size: 14px;
-            font-weight: 500;
-            color: #9cdcfe;
+            color: #14202e;
             margin-bottom: 4px;
+        }
+
+        QLabel {
+            font-size: 13px;
+            color: #202124;
         }
         
         QLineEdit {
-            background-color: #3c3c3c;
-            color: #cccccc;
-            border: 1px solid #555555;
+            background-color: #ffffff;
+            color: #202124;
+            border: 1px solid #c7cbd1;
             border-radius: 4px;
-            padding: 10px 12px;
+            padding: 8px 10px;
             font-size: 14px;
-            selection-background-color: #094771;
+            selection-background-color: #1e88e5;
+            selection-color: #ffffff;
         }
         
         QLineEdit:focus {
-            border-color: #007acc;
-            background-color: #404040;
+            border-color: #1e88e5;
         }
         
         QLineEdit:hover {
-            border-color: #6e6e6e;
+            border-color: #9aa0a6;
         }
         
         QLineEdit::placeholder {
-            color: #808080;
+            color: #9aa0a6;
         }
         
         QPushButton#browseButton {
-            background-color: #3c3c3c;
-            color: #cccccc;
-            border: 1px solid #555555;
+            background-color: #ffffff;
+            color: #202124;
+            border: 1px solid #c7cbd1;
             border-radius: 4px;
-            padding: 8px 12px;
             font-size: 14px;
         }
         
         QPushButton#browseButton:hover {
-            background-color: #464647;
-            border-color: #6e6e6e;
+            background-color: #eef0f3;
+            border-color: #9aa0a6;
         }
         
         QPushButton#browseButton:pressed {
-            background-color: #2a2a2a;
+            background-color: #dde5f0;
         }
         
         QCheckBox#enabledCheck, QCheckBox#autoCloseCheck {
-            font-size: 14px;
-            color: #cccccc;
+            font-size: 13px;
+            color: #202124;
             spacing: 8px;
         }
         
         QCheckBox#enabledCheck::indicator, QCheckBox#autoCloseCheck::indicator {
-            width: 18px;
-            height: 18px;
+            width: 16px;
+            height: 16px;
         }
         
         QCheckBox#enabledCheck::indicator:unchecked, QCheckBox#autoCloseCheck::indicator:unchecked {
-            background-color: #3c3c3c;
-            border: 1px solid #555555;
+            background-color: #ffffff;
+            border: 1px solid #9aa0a6;
+            border-radius: 3px;
         }
         
         QCheckBox#enabledCheck::indicator:unchecked:hover, QCheckBox#autoCloseCheck::indicator:unchecked:hover {
-            border-color: #0e639c;
+            border-color: #1e88e5;
         }
         
         QCheckBox#enabledCheck::indicator:checked, QCheckBox#autoCloseCheck::indicator:checked {
-            background-color: #007acc;
-            border: 1px solid #007acc;
+            background-color: #1e88e5;
+            border: 1px solid #1a76c9;
+            border-radius: 3px;
             image: url(data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTIiIGhlaWdodD0iOSIgdmlld0JveD0iMCAwIDEyIDkiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+CjxwYXRoIGQ9Ik0xMC41IDFMNCAxLjVMMSAzLjUiIHN0cm9rZT0id2hpdGUiIHN0cm9rZS13aWR0aD0iMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIi8+Cjwvc3ZnPgo=);
         }
         
         QCheckBox#enabledCheck::indicator:checked:hover, QCheckBox#autoCloseCheck::indicator:checked:hover {
-            background-color: #1177bb;
-            border-color: #1177bb;
+            background-color: #2c94ee;
+            border-color: #2c94ee;
         }
         
         QPushButton#okButton {
-            background-color: #0e639c;
+            background-color: #1e88e5;
             color: #ffffff;
-            border: 1px solid #1177bb;
+            border: 1px solid #1a76c9;
             border-radius: 4px;
-            padding: 10px 20px;
+            padding: 8px 20px;
             font-size: 14px;
             font-weight: 500;
         }
         
         QPushButton#okButton:hover {
-            background-color: #1177bb;
-            border-color: #1e88cc;
+            background-color: #2c94ee;
         }
         
         QPushButton#okButton:pressed {
-            background-color: #0d5a87;
+            background-color: #1670bd;
         }
         
         QPushButton#cancelButton {
             background-color: transparent;
-            color: #cccccc;
-            border: 1px solid #555555;
+            color: #202124;
+            border: 1px solid #c7cbd1;
             border-radius: 4px;
-            padding: 10px 20px;
+            padding: 8px 20px;
             font-size: 14px;
         }
         
         QPushButton#cancelButton:hover {
-            background-color: #3c3c3c;
-            color: #ffffff;
-            border-color: #6e6e6e;
+            background-color: #eef0f3;
+            border-color: #9aa0a6;
         }
         
         QPushButton#cancelButton:pressed {
-            background-color: #2a2a2a;
+            background-color: #dde5f0;
         }
         
         QFrame#separator {
-            background-color: #3e3e42;
+            background-color: #d5d8dc;
             max-height: 1px;
-            margin: 8px 0px;
+            margin: 4px 0px;
         }
         
         QFileDialog {
-            background-color: #2d2d30;
-            color: #cccccc;
-        }
-        
-        QFileDialog QListView {
-            background-color: #252526;
-            color: #cccccc;
-            selection-background-color: #094771;
-        }
-        
-        QFileDialog QTreeView {
-            background-color: #252526;
-            color: #cccccc;
-            selection-background-color: #094771;
-        }
-        
-        QFileDialog QLineEdit {
-            background-color: #3c3c3c;
-            color: #cccccc;
-            border: 1px solid #555555;
-        }
-        
-        QFileDialog QPushButton {
-            background-color: #3c3c3c;
-            color: #cccccc;
-            border: 1px solid #555555;
-            padding: 6px 12px;
-        }
-        
-        QFileDialog QPushButton:hover {
-            background-color: #464647;
+            background-color: #ffffff;
+            color: #202124;
         }
         """
