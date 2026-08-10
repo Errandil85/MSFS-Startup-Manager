@@ -4,6 +4,11 @@ from PySide6.QtWidgets import QSystemTrayIcon, QMenu, QApplication
 from PySide6.QtGui import QIcon, QAction
 from PySide6.QtCore import QObject, Signal
 
+from resource_utils import get_resource_path
+from logging_config import get_logger
+
+logger = get_logger(__name__)
+
 
 class SystemTrayManager(QObject):
     """Manages system tray icon and menu"""
@@ -17,32 +22,56 @@ class SystemTrayManager(QObject):
         self.tray_icon = None
         self.tray_menu = None
         
-    def setup_tray(self):
-        """Setup system tray icon and menu"""
+    def setup_tray(self, icon=None):
+        """
+        Setup system tray icon and menu.
+
+        Args:
+            icon: Optional pre-resolved QIcon (e.g. MainWindow.windowIcon()).
+                  Preferred over re-resolving icon.ico independently here,
+                  since two separate lookups of the same file is exactly
+                  how the window icon and tray icon can end up mismatched.
+                  Falls back to resolving icon.ico directly if not given,
+                  or if the given icon turns out to be null/empty.
+        """
         if not QSystemTrayIcon.isSystemTrayAvailable():
-            print("System tray is not available")
+            logger.warning("System tray is not available")
             return False
         
-        # Create tray icon
-        self.tray_icon = QSystemTrayIcon()
+        # Parent the tray icon to this manager instead of leaving it
+        # parentless, so its lifetime is tied to ours rather than relying
+        # on Qt's top-level object cleanup.
+        self.tray_icon = QSystemTrayIcon(self)
         
-        # Set icon (try to use the same icon as the main window)
         try:
-            icon = QIcon("icon.ico")
-            if icon.isNull():
-                # Fallback to a default icon if icon.ico doesn't exist
+            if icon is not None and not icon.isNull():
+                resolved_icon = icon
+            else:
+                # Fallback: resolve icon.ico ourselves using the same
+                # PyInstaller-aware path helper main.py uses, instead of a
+                # bare relative "icon.ico" (which only resolves correctly
+                # if the process's working directory happens to be the
+                # app's install folder - not guaranteed when launched via
+                # a shortcut or from exe.xml).
+                icon_path = get_resource_path("icon.ico")
+                resolved_icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
+                if resolved_icon.isNull() and not os.path.exists(icon_path):
+                    logger.warning(f"icon.ico not found at expected path: {icon_path} - using fallback tray icon")
+
+            if resolved_icon.isNull():
                 style = QApplication.style()
-                icon = style.standardIcon(style.StandardPixmap.SP_DesktopIcon)
-            self.tray_icon.setIcon(icon)
+                resolved_icon = style.standardIcon(style.StandardPixmap.SP_DesktopIcon)
+
+            self.tray_icon.setIcon(resolved_icon)
         except Exception as e:
-            print(f"Icon loading failed: {e}")
+            logger.warning(f"Icon loading failed: {e}")
             # Ultimate fallback
             try:
                 style = QApplication.style()
-                icon = style.standardIcon(style.StandardPixmap.SP_DesktopIcon)
-                self.tray_icon.setIcon(icon)
+                fallback_icon = style.standardIcon(style.StandardPixmap.SP_DesktopIcon)
+                self.tray_icon.setIcon(fallback_icon)
             except Exception as e2:
-                print(f"Fallback icon loading failed: {e2}")
+                logger.error(f"Fallback icon loading failed: {e2}")
                 # Create a minimal icon if all else fails
                 from PySide6.QtGui import QPixmap, QPainter, QBrush
                 from PySide6.QtCore import Qt

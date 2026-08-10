@@ -1,6 +1,10 @@
 import os
 import json
 
+from logging_config import get_logger
+
+logger = get_logger(__name__)
+
 APP_DIR = os.path.join(os.getenv("APPDATA"), "MSFSExeXmlManager")
 SETTINGS_FILE = os.path.join(APP_DIR, "settings.json")
 
@@ -187,7 +191,7 @@ def create_backup(exe_xml_path: str, sim_version: str):
         shutil.copy2(exe_xml_path, backup_path)
         return backup_path
     except Exception as e:
-        print(f"Failed to create backup: {e}")
+        logger.error(f"Failed to create backup: {e}")
         return None
 
 
@@ -215,7 +219,7 @@ def get_existing_backups(sim_version: str):
         backups.sort(key=lambda x: x[2], reverse=True)
         
     except Exception as e:
-        print(f"Failed to list backups: {e}")
+        logger.error(f"Failed to list backups: {e}")
     
     return backups
 

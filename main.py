@@ -23,15 +23,7 @@ from logging_config import get_logger
 
 logger = get_logger(__name__)
 
-def get_resource_path(relative_path):
-    """Get absolute path to resource, works for dev and for PyInstaller"""
-    try:
-        # PyInstaller creates a temp folder and stores path in _MEIPASS
-        base_path = sys._MEIPASS
-    except Exception:
-        base_path = os.path.abspath(".")
-    
-    return os.path.join(base_path, relative_path)
+from resource_utils import get_resource_path
 
 class BackupDialog(QMessageBox):
     def __init__(self, exe_xml_path, sim_version, parent=None):
@@ -381,7 +373,11 @@ class MainWindow(QMainWindow):
     
     def setup_tray(self):
         """Setup system tray functionality"""
-        if self.tray_manager.setup_tray():
+        # Reuse the icon MainWindow already resolved for the window itself
+        # (see __init__), instead of having SystemTrayManager independently
+        # re-resolve icon.ico from disk. Two separate lookups of the same
+        # file is how these things quietly drift out of sync.
+        if self.tray_manager.setup_tray(self.windowIcon()):
             logger.info("System tray initialized")
         else:
             logger.error("Failed to initialize system tray")
@@ -776,7 +772,7 @@ class MainWindow(QMainWindow):
         QMessageBox.about(
             self,
             "About MSFS Startup Manager",
-            f"<h3>MSFS Startup Manager v1.0.0-rc4</h3>"
+            f"<h3>MSFS Startup Manager v1.0.0-rc3</h3>"
             f"<p>A modern tool for managing Microsoft Flight Simulator addons.</p>"
             f"<p><b>Features:</b></p>"
             f"<ul>"
@@ -928,10 +924,24 @@ class MainWindow(QMainWindow):
     # Table Handling
     # -------------------------
     def populate_table(self):
+        # Capture which entry (by name|path identity, not row index - rows
+        # can shift) was selected before we tear down and rebuild the table,
+        # so a checkbox toggle or Modify doesn't kick you back to no
+        # selection every time.
+        selected_id = None
+        selection_model = self.table.selectionModel()
+        if selection_model is not None:
+            selected_rows = selection_model.selectedRows()
+            if selected_rows:
+                old_index = selected_rows[0].row()
+                if 0 <= old_index < len(self.manager.entries):
+                    selected_id = self.manager.entries[old_index]._generate_entry_id()
+
         self.table.blockSignals(True)
         self.table.setRowCount(len(self.manager.entries))
 
         generic_icon = self.style().standardIcon(QStyle.SP_FileIcon)
+        restore_row = None
         
         for row, entry in enumerate(self.manager.entries):
             # Enabled checkbox
@@ -969,9 +979,17 @@ class MainWindow(QMainWindow):
             auto_close_item.setTextAlignment(Qt.AlignCenter)
             auto_close_item.setToolTip("Automatically close this addon when the simulator stops")
             self.table.setItem(row, 4, auto_close_item)
+
+            if selected_id is not None and entry._generate_entry_id() == selected_id:
+                restore_row = row
         
         self.table.blockSignals(False)
         self.update_status()
+
+        if restore_row is not None:
+            self.table.selectRow(restore_row)
+            self.table.scrollToItem(self.table.item(restore_row, 0))
+
         self.on_selection_changed()  # keep toolbar actions in sync after a reload
 
     def on_selection_changed(self):
@@ -1872,18 +1890,24 @@ class MainWindow(QMainWindow):
             background-color: #ffffff;
             color: #202124;
             border: 1px solid #c7cbd1;
-            selection-background-color: #1e88e5;
-            selection-color: #ffffff;
             outline: none;
         }
         
         QComboBox QAbstractItemView::item {
             padding: 6px;
             border: none;
+            min-height: 22px;
+            color: #202124;
         }
         
         QComboBox QAbstractItemView::item:hover {
-            background-color: #dde5f0;
+            background-color: #1e88e5;
+            color: #ffffff;
+        }
+
+        QComboBox QAbstractItemView::item:selected {
+            background-color: #1e88e5;
+            color: #ffffff;
         }
         
         QTableWidget#modernTable {
@@ -1893,6 +1917,7 @@ class MainWindow(QMainWindow):
             alternate-background-color: #f6f7f9;
             selection-background-color: #1e88e5;
             selection-color: #ffffff;
+            outline: none;
         }
         
         QTableWidget#modernTable::item {
@@ -1900,14 +1925,46 @@ class MainWindow(QMainWindow):
             border: none;
             color: #202124;
         }
-        
-        QTableWidget#modernTable::item:selected {
-            background-color: #1e88e5;
-            color: #ffffff;
-        }
-        
+
         QTableWidget#modernTable::item:alternate {
             background-color: #f6f7f9;
+        }
+
+        QTableWidget#modernTable::item:hover {
+            background-color: #eaf2fc;
+            color: #202124;
+        }
+
+        QTableWidget#modernTable::item:focus {
+            border: none;
+            outline: none;
+        }
+
+        QTableWidget#modernTable::item:focus:!selected {
+            background-color: #ffffff;
+            color: #202124;
+            border: none;
+            outline: none;
+        }
+
+        /* Every selected-row variant (plain, hovered, focused, and
+           "inactive" after the table loses keyboard focus) consolidated
+           into one rule and placed LAST. Qt's stylesheet cascade breaks
+           ties between equal-specificity rules by declaration order, and
+           ::item:alternate has the same specificity as ::item:selected -
+           so on alternate rows, whichever was declared later in the file
+           was silently winning and washing out the selection color on
+           some columns while leaving others (styled by a more specific
+           rule, like :focus) correctly blue. Being last guarantees this
+           one wins everywhere, regardless of alternate/hover/focus state. */
+        QTableWidget#modernTable::item:selected,
+        QTableWidget#modernTable::item:selected:hover,
+        QTableWidget#modernTable::item:selected:focus,
+        QTableWidget#modernTable::item:selected:!active {
+            background-color: #1e88e5;
+            color: #ffffff;
+            border: none;
+            outline: none;
         }
         
         QHeaderView::section {
@@ -2136,6 +2193,29 @@ def main():
     app.setApplicationName("MSFS Startup Manager")
     app.setApplicationVersion("1.0.0-rc3")
     app.setOrganizationName("Flight Sim Tools")
+
+    # Set the app icon at the QApplication level. This is what Windows
+    # actually uses for the taskbar icon (MainWindow.setWindowIcon alone
+    # isn't enough, especially before the window is first shown) - without
+    # this it falls back to the generic Qt icon.
+    icon_path = get_resource_path("icon.ico")
+    if os.path.exists(icon_path):
+        app.setWindowIcon(QIcon(icon_path))
+    else:
+        logger.warning(f"icon.ico not found at expected path: {icon_path} - taskbar/window icon will fall back to the default Qt icon")
+
+    # On Windows, python.exe (or a frozen exe with no explicit AppUserModelID)
+    # gets grouped under a generic taskbar entry, which can also show the
+    # wrong icon. Giving the process its own AppUserModelID fixes both the
+    # icon and the taskbar grouping/pinning behavior.
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "FlightSimTools.MSFSStartupManager.1_0_0"
+            )
+        except Exception as e:
+            logger.warning(f"Could not set AppUserModelID: {e}")
     
     # Handle single instance
     instance_manager = SingleInstanceManager()

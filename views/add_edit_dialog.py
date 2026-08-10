@@ -2,13 +2,34 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit, QDialogButtonBox,
     QLabel, QCheckBox, QFileDialog, QPushButton, QFrame, QSpacerItem, QSizePolicy
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QFont
 import os
 
 from logging_config import get_logger
 
 logger = get_logger(__name__)
+
+
+class _PowerShellNameWorker(QThread):
+    """
+    Runs the PowerShell FileVersionInfo lookup off the GUI thread.
+
+    This is only a fallback for executables pefile couldn't read metadata
+    from. It used to run via a blocking subprocess.run(..., timeout=5) call
+    directly in browse_executable(), which froze the whole dialog (and the
+    app, since it's modal) for up to 5 seconds on every affected exe.
+    """
+    name_detected = Signal(str, str)  # file_path, detected_name
+
+    def __init__(self, file_path, parent=None):
+        super().__init__(parent)
+        self.file_path = file_path
+
+    def run(self):
+        name = AddEditDialog.get_name_via_powershell(self.file_path)
+        if name:
+            self.name_detected.emit(self.file_path, name)
 
 
 class ModernLineEdit(QLineEdit):
@@ -31,6 +52,12 @@ class AddEditDialog(QDialog):
         self.setModal(True)
         self.setMinimumSize(460, 300)  # Tighter than the old stacked-label layout
         self.setStyleSheet(self.get_light_dialog_stylesheet())
+
+        # Tracks the last name we auto-filled, so a later async PowerShell
+        # result knows whether it's safe to overwrite (user hasn't typed
+        # their own name in the meantime) or should be discarded.
+        self._auto_filled_name = None
+        self._ps_worker = None
         
         # Main layout
         layout = QVBoxLayout(self)
@@ -53,6 +80,13 @@ class AddEditDialog(QDialog):
         # Buttons
         button_layout = self.create_buttons()
         layout.addLayout(button_layout)
+
+    def closeEvent(self, event):
+        """Make sure a still-running background name lookup doesn't outlive the dialog."""
+        if self._ps_worker is not None and self._ps_worker.isRunning():
+            self._ps_worker.quit()
+            self._ps_worker.wait(1000)
+        super().closeEvent(event)
 
     def create_form(self):
         form = QFormLayout()
@@ -134,71 +168,116 @@ class AddEditDialog(QDialog):
             "",
             "Executable Files (*.exe);;All Files (*)"
         )
-        if file_path:
-            self.path_edit.setText(file_path)
-            
-            current_name = self.name_edit.text().strip()
-            if not current_name or current_name == "e.g., FSUIPC7, FSRealistic":
-                detected_name = self.get_exe_display_name(file_path)
-                if detected_name:
-                    self.name_edit.setText(detected_name)
+        if not file_path:
+            return
 
-    def get_exe_display_name(self, file_path):
-        """
-        Extract display name from executable metadata.
-        Tries multiple methods in order of preference.
-        """
+        self.path_edit.setText(file_path)
+
+        current_name = self.name_edit.text().strip()
+        if current_name and current_name != "e.g., FSUIPC7, FSRealistic":
+            # User already has a name in there (typed or from a previous
+            # detection) - don't clobber it.
+            return
+
+        # Fast path: pefile metadata read, then a filename-cleanup fallback.
+        # Both are local and near-instant, so this never noticeably blocks
+        # the UI.
+        fast_name = self.get_name_from_pefile(file_path)
+        source = "pefile"
+        if not fast_name:
+            fast_name = self.get_name_from_filename(file_path)
+            source = "filename"
+
+        if fast_name:
+            self.name_edit.setText(fast_name)
+            self._auto_filled_name = fast_name
+
+        if source == "pefile":
+            return  # Already got a good name, no need for the slow fallback
+
+        # Slow path: PowerShell's FileVersionInfo lookup is a better source
+        # than the filename guess, but subprocess.run() to launch it can
+        # take a few seconds. Run it in the background instead of blocking
+        # this (modal) dialog and the whole app with it.
+        self._start_powershell_lookup(file_path)
+
+    def _start_powershell_lookup(self, file_path):
+        if self._ps_worker is not None and self._ps_worker.isRunning():
+            self._ps_worker.quit()
+            self._ps_worker.wait(500)
+
+        self._ps_worker = _PowerShellNameWorker(file_path, self)
+        self._ps_worker.name_detected.connect(self._on_powershell_name_detected)
+        self._ps_worker.start()
+
+    def _on_powershell_name_detected(self, file_path, name):
+        # The user may have picked a different executable, or typed their
+        # own name, while the lookup was running - only apply this result
+        # if neither of those happened.
+        if self.path_edit.text().strip() != file_path:
+            return
+        current_name = self.name_edit.text().strip()
+        if current_name and current_name != self._auto_filled_name:
+            return  # user has since typed their own name - don't overwrite it
+        self.name_edit.setText(name)
+        self._auto_filled_name = name
+
+    @staticmethod
+    def get_name_from_pefile(file_path):
+        """Try reading ProductName / FileDescription / InternalName via pefile. Fast, local, safe to call synchronously."""
         if not os.path.exists(file_path):
             return None
-        
-        # Method 1: Try pefile library (most reliable and modern)
         try:
             import pefile
-            
+
             pe = pefile.PE(file_path)
-            
+
             if hasattr(pe, 'VS_VERSIONINFO'):
                 for file_info in pe.FileInfo:
                     if hasattr(file_info, 'StringTable'):
                         for string_table in file_info.StringTable:
                             for key, value in string_table.entries.items():
-                                key_str = key.decode('utf-8', errors='ignore')
-                                if key_str == 'ProductName':
+                                if key.decode('utf-8', errors='ignore') == 'ProductName':
                                     product_name = value.decode('utf-8', errors='ignore').strip()
                                     if product_name:
                                         pe.close()
                                         return product_name
-                            
+
                             for key, value in string_table.entries.items():
-                                key_str = key.decode('utf-8', errors='ignore')
-                                if key_str == 'FileDescription':
+                                if key.decode('utf-8', errors='ignore') == 'FileDescription':
                                     file_desc = value.decode('utf-8', errors='ignore').strip()
                                     if file_desc:
                                         pe.close()
                                         return file_desc
-                            
+
                             for key, value in string_table.entries.items():
-                                key_str = key.decode('utf-8', errors='ignore')
-                                if key_str == 'InternalName':
+                                if key.decode('utf-8', errors='ignore') == 'InternalName':
                                     internal_name = value.decode('utf-8', errors='ignore').strip()
                                     if internal_name:
                                         if internal_name.lower().endswith('.exe'):
                                             internal_name = internal_name[:-4]
                                         pe.close()
                                         return internal_name
-            
+
             pe.close()
-            
         except ImportError:
             pass
-        except Exception:
-            pass
-        
-        # Method 2: Try using Windows PowerShell (Windows-specific, no extra dependencies)
+        except Exception as e:
+            logger.info(f"pefile could not read metadata from {file_path}: {e}")
+
+        return None
+
+    @staticmethod
+    def get_name_via_powershell(file_path):
+        """
+        Slow fallback: query FileVersionInfo via PowerShell. Only called from
+        the background worker thread - never call this directly from the
+        GUI thread, it can take several seconds.
+        """
         try:
             import subprocess
             import json
-            
+
             ps_command = f'''
             $version = [System.Diagnostics.FileVersionInfo]::GetVersionInfo("{file_path}")
             $result = @{{
@@ -208,54 +287,54 @@ class AddEditDialog(QDialog):
             }}
             $result | ConvertTo-Json
             '''
-            
+
             result = subprocess.run(
                 ["powershell", "-Command", ps_command],
                 capture_output=True,
                 text=True,
                 timeout=5
             )
-            
+
             if result.returncode == 0 and result.stdout.strip():
                 data = json.loads(result.stdout.strip())
-                
+
                 if data.get('ProductName') and data['ProductName'].strip():
                     return data['ProductName'].strip()
-                
+
                 if data.get('FileDescription') and data['FileDescription'].strip():
                     return data['FileDescription'].strip()
-                
+
                 if data.get('InternalName') and data['InternalName'].strip():
                     name = data['InternalName'].strip()
                     if name.lower().endswith('.exe'):
                         name = name[:-4]
                     return name
-                    
-        except Exception:
-            pass
-        
-        # Method 3: Fallback to filename without extension
+
+        except Exception as e:
+            logger.info(f"PowerShell name lookup failed for {file_path}: {e}")
+
+        return None
+
+    @staticmethod
+    def get_name_from_filename(file_path):
+        """Instant fallback: clean up the bare filename. Always returns something."""
         try:
             base_name = os.path.splitext(os.path.basename(file_path))[0]
-            
+
             import re
             cleaned_name = re.sub(r'\s*v?\d+(\.\d+)*\s*$', '', base_name, flags=re.IGNORECASE)
-            
+
             suffixes_to_remove = ['_setup', '_installer', '_x64', '_x86', '_win64', '_win32']
             for suffix in suffixes_to_remove:
                 if cleaned_name.lower().endswith(suffix.lower()):
                     cleaned_name = cleaned_name[:-len(suffix)]
                     break
-            
+
             if cleaned_name:
                 return ' '.join(word.capitalize() for word in cleaned_name.replace('_', ' ').replace('-', ' ').split())
-            else:
-                return base_name
-                
+            return base_name
         except Exception:
-            pass
-        
-        return os.path.basename(file_path)
+            return os.path.basename(file_path)
 
     def get_data(self):
         return (
@@ -264,6 +343,7 @@ class AddEditDialog(QDialog):
             self.args_edit.text().strip(),
             self.enabled_check.isChecked(),
             self.auto_close_check.isChecked()
+
         )
 
     def get_light_dialog_stylesheet(self):

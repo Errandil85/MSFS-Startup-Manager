@@ -24,9 +24,14 @@ import os
 import logging
 import logging.handlers
 
-import settings  # for APP_DIR
-
-LOG_DIR = os.path.join(settings.APP_DIR, "logs")
+# NOTE: deliberately does NOT import settings.py here. settings.py imports
+# get_logger from this module, so importing settings back would create a
+# circular import (logging_config -> settings -> logging_config) that
+# fails at startup. This module computes the same APP_DIR independently
+# instead - it's the same %APPDATA%/MSFSExeXmlManager path settings.py
+# uses, just not shared via import.
+APP_DIR = os.path.join(os.getenv("APPDATA"), "MSFSExeXmlManager")
+LOG_DIR = os.path.join(APP_DIR, "logs")
 LOG_FILE = os.path.join(LOG_DIR, "msfs_startup_manager.log")
 
 

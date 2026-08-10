@@ -7,6 +7,10 @@ from PySide6.QtCore import QObject, Signal, QThread, QTimer
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication
 
+from logging_config import get_logger
+
+logger = get_logger(__name__)
+
 
 class SingleInstanceManager(QObject):
     """Manages single instance functionality and inter-process communication"""
@@ -47,10 +51,10 @@ class SingleInstanceManager(QObject):
         
         if self.server.listen(self.server_name):
             self.is_primary = True
-            print(f"Started single instance server: {self.server_name}")
+            logger.info(f"Started single instance server: {self.server_name}")
             return True
         else:
-            print(f"Failed to start server: {self.server.errorString()}")
+            logger.error(f"Failed to start server: {self.server.errorString()}")
             return False
     
     def _handle_new_connection(self):
@@ -72,7 +76,7 @@ class SingleInstanceManager(QObject):
                 self.shutdown_requested.emit()
                 
         except Exception as e:
-            print(f"Error handling client message: {e}")
+            logger.error(f"Error handling client message: {e}")
         finally:
             socket.disconnectFromServer()
     

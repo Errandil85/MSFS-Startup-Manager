@@ -7,6 +7,11 @@ from xml.dom import minidom
 import json
 import hashlib
 
+from logging_config import get_logger
+
+logger = get_logger(__name__)
+
+
 class AppEntry:
     def __init__(self, elem, auto_close_settings=None):
         self.elem = elem
@@ -38,6 +43,7 @@ class AppEntry:
         """Generate a unique ID for this entry based on name and path"""
         unique_string = f"{self.name}|{self.path}"
         return hashlib.md5(unique_string.encode()).hexdigest()
+
 
 class ExeXmlManager:
     def __init__(self):
@@ -78,7 +84,7 @@ class ExeXmlManager:
             else:
                 self.auto_close_settings = {}
         except Exception as e:
-            print(f"Error loading auto-close settings: {e}")
+            logger.error(f"Error loading auto-close settings: {e}")
             self.auto_close_settings = {}
 
     def _save_auto_close_settings(self):
@@ -99,6 +105,7 @@ class ExeXmlManager:
         if stale_ids:
             for eid in stale_ids:
                 del self.auto_close_settings[eid]
+            logger.info(f"Pruned {len(stale_ids)} stale auto-close setting(s)")
             self._save_auto_close_settings()
 
     def load_preset(self, preset_path):
@@ -126,7 +133,7 @@ class ExeXmlManager:
                     entry_data.get("auto_close", False)
                 )
             
-            print(f"Loaded preset with {len(preset_data.get('entries', []))} entries")
+            logger.info(f"Loaded preset with {len(preset_data.get('entries', []))} entries")
             
         except json.JSONDecodeError as e:
             raise ValueError(f"Invalid preset file format: {e}")
@@ -166,6 +173,8 @@ class ExeXmlManager:
                     self.entries.append(AppEntry(elem, self.auto_close_settings))
                 break  # Use the first pattern that finds elements
 
+        logger.info(f"Total entries loaded: {len(self.entries)}")
+
     # -------------------------
     # Atomic file writing helpers
     # -------------------------
@@ -186,7 +195,8 @@ class ExeXmlManager:
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp_path, path)  # atomic on Windows and POSIX
-        except Exception:
+        except Exception as e:
+            logger.error(f"Atomic write to {path} failed: {e}")
             if os.path.exists(tmp_path):
                 try:
                     os.remove(tmp_path)
@@ -278,10 +288,11 @@ class ExeXmlManager:
             raise FileNotFoundError(f"Executable not found: {entry.path}")
         
         # shlex.split respects quoted arguments (e.g. paths with spaces),
-        # unlike the previous naive .split() on whitespace.
+        # unlike a naive whitespace .split().
         args = shlex.split(entry.args, posix=False) if entry.args else []
         working_dir = os.path.dirname(entry.path) or None
         
+        logger.info(f"Launching entry: {entry.name} -> {entry.path} {args} (cwd={working_dir})")
         process = subprocess.Popen([entry.path] + args, cwd=working_dir)
         return process
 
