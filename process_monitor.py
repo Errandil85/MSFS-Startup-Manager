@@ -152,6 +152,63 @@ class ProcessMonitor(QObject):
             total_terminated += self.terminate_addon_processes(addon_name)
         return total_terminated
 
+    def terminate_simulator_processes(self) -> int:
+        """
+        Force-terminate any currently tracked simulator process(es) - used
+        for the Stop button, to recover from a hung simulator without
+        needing Task Manager. Reuses the same terminate -> wait ->
+        force-kill escalation as terminate_addon_processes.
+
+        Emits sim_stopped for each process actually stopped, same as a
+        normal simulator exit, so the existing auto-close cascade (and
+        any UI state tied to that signal) runs exactly as it would if the
+        simulator had closed on its own.
+        """
+        with self._lock:
+            processes = list(self.sim_processes.items())  # [(exe_name, ProcessInfo), ...]
+
+        if not processes:
+            logger.info("terminate_simulator_processes called but no simulator process is tracked")
+            return 0
+
+        terminated_count = 0
+        stopped_names = []
+
+        for exe_name, process_info in processes:
+            try:
+                process = psutil.Process(process_info.pid)
+                if process.is_running():
+                    logger.info(f"Force-terminating simulator process: {exe_name} (PID: {process_info.pid})")
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5.0)
+                        logger.info(f"Simulator process {process_info.pid} terminated gracefully")
+                    except psutil.TimeoutExpired:
+                        if process.is_running():
+                            logger.info(f"Simulator process {process_info.pid} didn't respond to terminate, force killing...")
+                            process.kill()
+                            try:
+                                process.wait(timeout=2.0)
+                                logger.info(f"Simulator process {process_info.pid} force killed")
+                            except psutil.TimeoutExpired:
+                                logger.error(f"Failed to kill simulator process {process_info.pid} - it may be unkillable (e.g. stuck in an uninterruptible I/O wait)")
+                                continue
+                    terminated_count += 1
+                stopped_names.append(exe_name)
+            except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
+                logger.info(f"Simulator process {process_info.pid} already gone or access denied: {e}")
+                stopped_names.append(exe_name)
+
+        with self._lock:
+            for exe_name in stopped_names:
+                if exe_name in self.sim_processes:
+                    del self.sim_processes[exe_name]
+
+        for exe_name in stopped_names:
+            self.sim_stopped.emit(exe_name)
+
+        return terminated_count
+
     def is_simulator_running(self) -> bool:
         with self._lock:
             return len(self.sim_processes) > 0

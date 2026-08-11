@@ -9,13 +9,14 @@ from PySide6.QtWidgets import (
     QHeaderView, QSpacerItem, QSizePolicy, QMenu, QMenuBar, QCheckBox,
     QSystemTrayIcon, QToolBar, QToolButton, QStyle, QFileIconProvider
 )
-from PySide6.QtCore import Qt, QSize, QTimer, QFileInfo
-from PySide6.QtGui import QFont, QIcon, QPalette, QColor, QAction, QCloseEvent
+from PySide6.QtCore import Qt, QSize, QTimer, QFileInfo, QPointF, QRectF
+from PySide6.QtGui import QFont, QIcon, QPalette, QColor, QAction, QCloseEvent, QPixmap, QPainter, QBrush, QPolygonF
 from exexml import ExeXmlManager
 from views.add_edit_dialog import AddEditDialog
 from process_monitor import ProcessMonitor
 from single_instance import SingleInstanceManager
 from system_tray import SystemTrayManager
+from controllers.simulator_controller import SimulatorController
 import settings
 from PySide6.QtGui import QIcon
 import json
@@ -24,6 +25,48 @@ from logging_config import get_logger
 logger = get_logger(__name__)
 
 from resource_utils import get_resource_path
+
+
+def make_circular_glyph_icon(bg_color: str, glyph: str, size: int = 20) -> QIcon:
+    """
+    Draw a simple filled circle with a white play-triangle or stop-square
+    glyph in the middle. Used for the Launch Sim / Stop Sim toolbar
+    actions - Qt's standard icon set (QStyle.SP_*) doesn't include a
+    proper play/stop pair, and pulling in real icon asset files would add
+    a packaging dependency for two small glyphs.
+
+    Args:
+        bg_color: hex color string for the circle fill, e.g. "#2e7d32"
+        glyph: "play" or "stop"
+        size: icon size in pixels (square)
+    """
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.transparent)
+
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setPen(Qt.NoPen)
+
+    painter.setBrush(QBrush(QColor(bg_color)))
+    painter.drawEllipse(0, 0, size, size)
+
+    painter.setBrush(QBrush(QColor("#ffffff")))
+    if glyph == "play":
+        # A centered triangle looks visually off-center (optical illusion
+        # from the point), so nudge it slightly right.
+        left = size * 0.32
+        right = size * 0.76
+        top = size * 0.22
+        bottom = size * 0.78
+        triangle = QPolygonF([QPointF(left, top), QPointF(left, bottom), QPointF(right, size / 2)])
+        painter.drawPolygon(triangle)
+    elif glyph == "stop":
+        pad = size * 0.28
+        painter.drawRoundedRect(QRectF(pad, pad, size - 2 * pad, size - 2 * pad), 1.5, 1.5)
+
+    painter.end()
+    return QIcon(pixmap)
+
 
 class BackupDialog(QMessageBox):
     def __init__(self, exe_xml_path, sim_version, parent=None):
@@ -181,6 +224,7 @@ class MainWindow(QMainWindow):
         
         # Process monitoring
         self.process_monitor = ProcessMonitor()
+        self.process_monitor.sim_started.connect(self.on_sim_process_started)
         self.process_monitor.sim_stopped.connect(self.on_simulator_stopped)
         self.process_monitor.addon_started.connect(self.on_addon_started)
         self.process_monitor.addon_stopped.connect(self.on_addon_stopped)
@@ -190,6 +234,14 @@ class MainWindow(QMainWindow):
         self.tray_manager = SystemTrayManager(self)
         self.tray_manager.show_window_requested.connect(self.show_from_tray)
         self.tray_manager.exit_requested.connect(self.exit_application)
+
+        # Simulator launch controller (handles Steam vs MS Store/Xbox
+        # detection, optional elevation, and the persisted admin
+        # preference - kept separate from MainWindow itself)
+        self.sim_controller = SimulatorController(self)
+        self.sim_controller.launch_started.connect(self.on_sim_launch_started)
+        self.sim_controller.launch_succeeded.connect(self.on_sim_launch_succeeded)
+        self.sim_controller.launch_failed.connect(self.on_sim_launch_failed)
         
         # Track if we're really exiting (not just hiding to tray)
         self.really_exit = False
@@ -208,6 +260,10 @@ class MainWindow(QMainWindow):
         
         # Auto load with detection
         self.auto_load_exe()
+
+        # Covers the case where auto_load_exe() above found no saved path
+        # to load (load_exe's own refresh never ran in that case).
+        self.refresh_run_as_admin_checkbox()
         
         # Start process monitoring
         self.process_monitor.start_monitoring(self.current_version)
@@ -351,6 +407,27 @@ class MainWindow(QMainWindow):
         self.sim_combo.setCurrentText(self.current_version)
         self.sim_combo.currentTextChanged.connect(self.change_version)
         toolbar.addWidget(self.sim_combo)
+
+        # --- Launch / Stop simulator (single toggle button) ---
+        # Starts in the "not running" (green play) state; corrected almost
+        # immediately by the process monitor's initial scan if the sim
+        # turns out to already be running. See update_sim_toggle_action,
+        # on_sim_process_started, and on_simulator_stopped for how this
+        # stays in sync - it doubles as a live running/stopped indicator,
+        # not just a launch button.
+        self.sim_toggle_action = QAction(make_circular_glyph_icon("#2e7d32", "play"), "Launch Sim", self)
+        self.sim_toggle_action.triggered.connect(self.on_sim_toggle_clicked)
+        toolbar.addAction(self.sim_toggle_action)
+        self.update_sim_toggle_action(is_running=False)
+
+        # Visible checkbox instead of a toggle hidden behind a dropdown -
+        # its enabled/checked state and tooltip get refreshed whenever the
+        # sim version or loaded exe.xml changes (see
+        # refresh_run_as_admin_checkbox), since whether elevation is even
+        # possible depends on Steam vs MS Store/Xbox detection.
+        self.run_as_admin_checkbox = QCheckBox("Run as Admin")
+        self.run_as_admin_checkbox.toggled.connect(self.on_run_as_admin_toggled)
+        toolbar.addWidget(self.run_as_admin_checkbox)
 
         toolbar.addSeparator()
 
@@ -798,6 +875,7 @@ class MainWindow(QMainWindow):
         self.update_status(f"Switched to {version}")
         
         # Update process monitoring for new version
+        self.update_sim_toggle_action(is_running=False)
         self.process_monitor.stop_monitoring()
         self.running_addons.clear()
         
@@ -810,6 +888,145 @@ class MainWindow(QMainWindow):
         
         # Restart monitoring for new version
         self.process_monitor.start_monitoring(version)
+
+        # The detected install type (and therefore whether elevated
+        # launch is even possible) depends on the sim version, so refresh
+        # regardless of whether auto_load_exe() above found a saved file.
+        self.refresh_run_as_admin_checkbox()
+
+    # -------------------------
+    # Simulator Launch Handling
+    # -------------------------
+    def on_sim_toggle_clicked(self):
+        """
+        Single toggle button: launches the sim if it's not running, or
+        force-stops it (with confirmation) if it is. Which behavior fires
+        is decided by actual detected process state, not by which icon
+        happens to be showing, so it can't get out of sync with reality.
+        """
+        if self.process_monitor.is_simulator_running():
+            self.stop_simulator()
+        else:
+            self.launch_simulator()
+
+    def update_sim_toggle_action(self, is_running: bool):
+        """
+        Sync the toggle button's icon/label/tooltip to actual sim state.
+        This is what turns it from "a launch button" into "a running/
+        stopped indicator you can also click" - called from
+        on_sim_process_started, on_simulator_stopped, and once at
+        startup/version-change to establish the initial state.
+        """
+        if is_running:
+            self.sim_toggle_action.setIcon(make_circular_glyph_icon("#c62828", "stop"))
+            self.sim_toggle_action.setText("Stop Sim")
+            self.sim_toggle_action.setToolTip(
+                f"{self.current_version} is running - click to force-stop (use if it has hung)"
+            )
+        else:
+            self.sim_toggle_action.setIcon(make_circular_glyph_icon("#2e7d32", "play"))
+            self.sim_toggle_action.setText("Launch Sim")
+            self.sim_toggle_action.setToolTip(f"Launch {self.current_version}")
+
+    def launch_simulator(self):
+        """Launch the currently selected simulator version via SimulatorController."""
+        self.sim_controller.launch(self.current_version, self.manager.filepath)
+
+    def stop_simulator(self):
+        """
+        Force-terminate the running simulator. This is a blunt instrument
+        (equivalent to ending the task in Task Manager) intended for a
+        hung simulator that isn't responding - not a normal way to close
+        it - so it asks for confirmation and defaults to "No".
+        """
+        if not self.process_monitor.is_simulator_running():
+            QMessageBox.information(
+                self,
+                "Simulator Not Running",
+                f"{self.current_version} does not appear to be running."
+            )
+            self.update_sim_toggle_action(is_running=False)
+            return
+
+        reply = QMessageBox.warning(
+            self,
+            "Force Stop Simulator?",
+            f"This will forcefully terminate {self.current_version}.\n\n"
+            f"Use this if the simulator has hung and isn't responding - any "
+            f"unsaved progress in the simulator will be lost.\n\n"
+            f"Are you sure you want to continue?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        terminated = self.process_monitor.terminate_simulator_processes()
+        if terminated > 0:
+            logger.info(f"User force-stopped {self.current_version}: {terminated} process(es) terminated")
+            self.update_status(f"Force-stopped {self.current_version} ({terminated} process(es) terminated)")
+        else:
+            self.update_status(f"{self.current_version} was not running")
+
+    def on_sim_process_started(self, sim_name):
+        """Switch the toggle button to its "running" (red stop) state."""
+        self.update_sim_toggle_action(is_running=True)
+
+    def refresh_run_as_admin_checkbox(self):
+        """
+        Recompute the Run as Admin checkbox's enabled/checked state and
+        tooltip. There's no "menu about to open" moment for a plain
+        checkbox like there was for the old dropdown toggle, so this gets
+        called explicitly whenever something that affects install-type
+        detection changes: switching sim version, loading an exe.xml, or
+        auto-detecting one.
+        """
+        install_type = self.sim_controller.detect_install_type(self.current_version, self.manager.filepath)
+        admin_supported = self.sim_controller.is_admin_supported(install_type)
+        preference = self.sim_controller.get_run_as_admin(self.current_version)
+
+        # Update without re-triggering on_run_as_admin_toggled while we
+        # just sync the displayed state to the stored preference.
+        self.run_as_admin_checkbox.blockSignals(True)
+        self.run_as_admin_checkbox.setChecked(preference and admin_supported)
+        self.run_as_admin_checkbox.setEnabled(admin_supported)
+        self.run_as_admin_checkbox.blockSignals(False)
+
+        if install_type == "ms_store":
+            self.run_as_admin_checkbox.setToolTip(
+                "Not available: MS Store/Xbox installs cannot be launched elevated "
+                "(this is a Windows platform restriction, not a limitation of this app)."
+            )
+        elif install_type == "steam":
+            self.run_as_admin_checkbox.setToolTip(
+                "Launch the simulator elevated via Steam. Steam itself will be "
+                "launched as Administrator, and the game will inherit those rights."
+            )
+        else:
+            self.run_as_admin_checkbox.setToolTip(
+                "Load or auto-detect an exe.xml file for this simulator version "
+                "to determine whether elevated launch is available."
+            )
+
+    def on_run_as_admin_toggled(self, checked):
+        self.sim_controller.set_run_as_admin(self.current_version, checked)
+
+    def on_sim_launch_started(self, sim_version):
+        self.update_status(f"Launching {sim_version}...")
+
+    def on_sim_launch_succeeded(self, sim_version, install_type):
+        label = {"steam": "Steam", "ms_store": "MS Store/Xbox"}.get(install_type, install_type)
+        self.update_status(f"Launched {sim_version} via {label}")
+        if self.tray_manager.is_visible() and self.isHidden():
+            self.tray_manager.show_message(
+                "Simulator Launching",
+                f"Launching {sim_version} via {label}",
+                QSystemTrayIcon.Information
+            )
+
+    def on_sim_launch_failed(self, sim_version, error_message):
+        self.update_status(f"Failed to launch {sim_version}")
+        QMessageBox.critical(self, "Launch Failed", f"Could not launch {sim_version}:\n\n{error_message}")
 
     # -------------------------
     # exe.xml Handling
@@ -862,6 +1079,11 @@ class MainWindow(QMainWindow):
             # Determine installation type and update status
             install_type = settings.get_installation_type(path)
             self.update_status(f"Loaded {os.path.basename(path)} ({install_type})")
+
+            # This is the most reliable source for install-type detection
+            # (Steam vs MS Store/Xbox), so refresh the admin checkbox now
+            # that a real exe.xml path is available.
+            self.refresh_run_as_admin_checkbox()
             
             # Show tray notification if running in background
             if self.tray_manager.is_visible() and self.isHidden():
@@ -1280,6 +1502,12 @@ class MainWindow(QMainWindow):
         logger.info(f"Simulator: {sim_name}")
         logger.info(f"Auto-quit after autoclose: {self.auto_quit_after_autoclose}")
         logger.info(f"Running in background: {self.start_hidden}")
+
+        # Sync the Stop button - checked via is_simulator_running() rather
+        # than unconditionally disabling, since a sim version can have
+        # more than one recognized executable name and another variant
+        # could still be running.
+        self.update_sim_toggle_action(is_running=self.process_monitor.is_simulator_running())
         
         # Debug current state
         self.process_monitor.debug_status()

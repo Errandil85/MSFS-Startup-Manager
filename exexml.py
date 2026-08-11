@@ -56,7 +56,15 @@ class ExeXmlManager:
 
     def load(self, filepath):
         self.filepath = filepath
-        self.tree = ET.parse(filepath)
+
+        # Comments in exe.xml (e.g. left behind by an addon installer, or
+        # hand-added by the user) were previously dropped silently on the
+        # very first save, since ET.parse()'s default parser discards
+        # them. This comment-preserving parser (stdlib, Python 3.8+)
+        # keeps them as Comment nodes in the tree instead, so they
+        # round-trip through load -> save intact.
+        parser = ET.XMLParser(target=ET.TreeBuilder(insert_comments=True))
+        self.tree = ET.parse(filepath, parser=parser)
         self.root = self.tree.getroot()
         
         # Load auto-close settings from separate file

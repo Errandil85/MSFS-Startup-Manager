@@ -139,7 +139,12 @@ def get_installation_type(path: str):
     Returns:
         str: "Steam", "MS Store", or "Unknown"
     """
-    path_lower = path.lower()
+    # Qt's file dialogs return forward-slash paths on Windows regardless
+    # of OS convention (e.g. "C:/Users/.../AppData/Roaming/..."), so
+    # normalize to backslashes before matching - otherwise a literal
+    # "appdata\\roaming" check silently never matches a forward-slash
+    # path and every Steam install falls through to "Unknown".
+    path_lower = path.lower().replace("/", "\\")
     
     if "packages" in path_lower and "microsoft.flightsimulator_8wekyb3d8bbwe" in path_lower:
         return "MS Store (MSFS2020)"
