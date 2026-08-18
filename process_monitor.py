@@ -85,6 +85,75 @@ class ProcessMonitor(QObject):
                 del self.tracked_addon_paths[addon_name]
         logger.info(f"Removed addon from monitor: {addon_name}")
 
+    def track_known_process(self, addon_name: str, pid: int, exe_path: str = ""):
+        """
+        Immediately register a process we already know about (e.g. one
+        this app just launched itself via Popen and already has the PID
+        for), instead of waiting for the next poll cycle to discover it
+        through a name/path scan. Closes a race where clicking Stop
+        immediately after Start would find nothing tracked yet to
+        terminate, and where the Running/Stopped status would lag by up
+        to one poll interval after a manual launch.
+        """
+        exe_name = os.path.basename(exe_path) if exe_path else ""
+        newly_tracked = False
+        with self._lock:
+            if addon_name not in self.addon_processes:
+                self.addon_processes[addon_name] = []
+            if not any(p.pid == pid for p in self.addon_processes[addon_name]):
+                self.addon_processes[addon_name].append(ProcessInfo(pid, exe_name, exe_path))
+                newly_tracked = True
+
+        if newly_tracked:
+            logger.info(f"Immediately tracking known process: {addon_name} (PID: {pid})")
+            self.addon_started.emit(addon_name, pid)
+
+    def terminate_by_exe_path(self, exe_path: str) -> int:
+        """
+        Immediately scan for and terminate any process matching exe_path,
+        regardless of whether it's currently in the tracked
+        addon_processes dict. Used as a robust fallback for manual Stop,
+        so it isn't dependent on a prior scan (via polling or
+        add_addon_to_monitor) having already succeeded in finding and
+        tracking the process - e.g. if it was started outside this app
+        entirely, or the poll cycle simply hasn't run yet.
+        """
+        if not exe_path or not os.path.exists(exe_path):
+            return 0
+
+        exe_name = os.path.basename(exe_path)
+        exe_path_normalized = os.path.normpath(exe_path).lower()
+        terminated_count = 0
+
+        for proc in psutil.process_iter(['pid', 'name', 'exe']):
+            try:
+                proc_info = proc.info
+                if proc_info['name'] != exe_name:
+                    continue
+                proc_exe = proc_info.get('exe')
+                if proc_exe and os.path.normpath(proc_exe).lower() != exe_path_normalized:
+                    continue
+
+                process = psutil.Process(proc_info['pid'])
+                if process.is_running():
+                    logger.info(f"Force-terminating process by path match: {exe_path} (PID: {proc_info['pid']})")
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5.0)
+                    except psutil.TimeoutExpired:
+                        if process.is_running():
+                            process.kill()
+                            try:
+                                process.wait(timeout=2.0)
+                            except psutil.TimeoutExpired:
+                                logger.error(f"Failed to kill process {proc_info['pid']}")
+                                continue
+                    terminated_count += 1
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+
+        return terminated_count
+
     def _initial_scan(self):
         try:
             logger.info("Performing initial process scan...")
@@ -143,9 +212,26 @@ class ProcessMonitor(QObject):
         logger.info(f"Terminated {terminated_count} processes for {addon_name}")
         return terminated_count
 
-    def terminate_all_addon_processes(self) -> int:
+    def terminate_all_addon_processes(self, exclude_prefixes: tuple = ()) -> int:
+        """
+        Terminate every currently tracked addon process, optionally
+        excluding any whose tracking key starts with one of
+        exclude_prefixes.
+
+        This exists as a catch-all safety net when the simulator stops,
+        to clean up any exe.xml auto-close addon not caught by the more
+        targeted per-entry pass in MainWindow.on_simulator_stopped. It
+        must NOT sweep up companion apps, which have their own separate
+        Stop w/ Sim opt-in per entry - they only share this same tracker
+        for live Running/Stopped status, not for auto-close eligibility.
+        Callers that need that protection should pass
+        exclude_prefixes=("companion:",).
+        """
         with self._lock:
-            addon_names = list(self.addon_processes.keys())
+            addon_names = [
+                name for name in self.addon_processes.keys()
+                if not any(name.startswith(prefix) for prefix in exclude_prefixes)
+            ]
 
         total_terminated = 0
         for addon_name in addon_names:
@@ -302,6 +388,7 @@ class ProcessMonitor(QObject):
             current_pids = {p.pid for p in self.addon_processes.get(addon_name, [])}
 
         found = []
+        skipped_unverified = 0
         for proc in psutil.process_iter(['pid', 'name', 'exe']):
             try:
                 proc_info = proc.info
@@ -315,10 +402,24 @@ class ProcessMonitor(QObject):
                     if proc_exe_normalized != exe_path_normalized:
                         continue
                 else:
-                    logger.error(f"Warning: Could not get exe path for PID {proc_info['pid']}, matching by name only")
+                    # Can't verify the actual path (psutil often can't
+                    # read it for processes owned by another user/session,
+                    # protected processes, etc.) - a name match alone is
+                    # not reliable enough to trust: plenty of unrelated
+                    # programs can share a generic exe filename with a
+                    # tracked entry. Skip rather than risk a false
+                    # "running" status.
+                    skipped_unverified += 1
+                    continue
                 found.append(ProcessInfo(proc_info['pid'], proc_info['name'], proc_exe or exe_path))
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 continue
+
+        if skipped_unverified:
+            logger.info(
+                f"Skipped {skipped_unverified} process(es) named '{exe_name}' while scanning for "
+                f"{addon_name}: could not verify their actual path, so not counted as a match."
+            )
 
         if found:
             with self._lock:

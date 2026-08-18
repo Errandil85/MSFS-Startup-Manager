@@ -7,16 +7,19 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QPushButton, QComboBox, QLabel,
     QFileDialog, QMessageBox, QAbstractItemView, QInputDialog, QFrame,
     QHeaderView, QSpacerItem, QSizePolicy, QMenu, QMenuBar, QCheckBox,
-    QSystemTrayIcon, QToolBar, QToolButton, QStyle, QFileIconProvider
+    QSystemTrayIcon, QToolBar, QToolButton, QStyle, QFileIconProvider,
+    QTabWidget
 )
 from PySide6.QtCore import Qt, QSize, QTimer, QFileInfo, QPointF, QRectF
 from PySide6.QtGui import QFont, QIcon, QPalette, QColor, QAction, QCloseEvent, QPixmap, QPainter, QBrush, QPolygonF
 from exexml import ExeXmlManager
 from views.add_edit_dialog import AddEditDialog
+from views.companion_app_dialog import CompanionAppDialog
 from process_monitor import ProcessMonitor
 from single_instance import SingleInstanceManager
 from system_tray import SystemTrayManager
 from controllers.simulator_controller import SimulatorController
+from controllers.companion_apps_controller import CompanionAppsController
 import settings
 from PySide6.QtGui import QIcon
 import json
@@ -242,6 +245,26 @@ class MainWindow(QMainWindow):
         self.sim_controller.launch_started.connect(self.on_sim_launch_started)
         self.sim_controller.launch_succeeded.connect(self.on_sim_launch_succeeded)
         self.sim_controller.launch_failed.connect(self.on_sim_launch_failed)
+
+        # Companion apps (Little Navmap, Navigraph Charts, ACARS clients,
+        # etc.) - standalone tools not managed via exe.xml. Reuses
+        # self.process_monitor's existing generic addon tracking rather
+        # than a separate monitoring system.
+        self.companion_controller = CompanionAppsController(self.process_monitor, self)
+        self.companion_controller.status_message.connect(self.update_status)
+        self.companion_controller.app_launch_failed.connect(self.on_companion_launch_failed)
+        self.companion_controller.entries_changed.connect(self.populate_companion_table)
+
+        # Automatic start-with-sim / stop-with-sim, driven by the same
+        # signals that already drive exe.xml auto-close.
+        self.process_monitor.sim_started.connect(self.companion_controller.on_sim_started)
+        self.process_monitor.sim_stopped.connect(self.companion_controller.on_sim_stopped)
+
+        # Live "Running"/"Stopped" status in the Companion Apps table -
+        # addon_started/addon_stopped fire for exe.xml addons too, so
+        # filter to only the namespaced companion: keys.
+        self.process_monitor.addon_started.connect(self.on_companion_process_event)
+        self.process_monitor.addon_stopped.connect(self.on_companion_process_event)
         
         # Track if we're really exiting (not just hiding to tray)
         self.really_exit = False
@@ -306,14 +329,53 @@ class MainWindow(QMainWindow):
         title = ModernLabel("MSFS Startup Manager")
         title.setObjectName("mainTitle")
         layout.addWidget(title)
-        
-        # Table section
-        self.create_table()
-        layout.addWidget(self.table)
+
+        # Tabs: exe.xml-managed startup apps vs standalone companion apps
+        self.tab_widget = QTabWidget()
+        self.tab_widget.setObjectName("mainTabs")
+        layout.addWidget(self.tab_widget)
+
+        self.tab_widget.addTab(self.create_startup_apps_tab(), "Startup Apps")
+        self.tab_widget.addTab(self.create_companion_apps_tab(), "Companion Apps")
+        self.tab_widget.currentChanged.connect(self.on_tab_changed)
         
         # Status section
         status_layout = self.create_status()
         layout.addLayout(status_layout)
+
+    def create_startup_apps_tab(self):
+        """Tab 1: entries launched by MSFS itself via exe.xml (the original table)."""
+        tab = QWidget()
+        tab_layout = QVBoxLayout(tab)
+        tab_layout.setContentsMargins(0, 8, 0, 0)
+        self.create_table()
+        tab_layout.addWidget(self.table)
+        return tab
+
+    def create_companion_apps_tab(self):
+        """
+        Tab 2: standalone tools (Little Navmap, Navigraph Charts, ACARS
+        clients, etc.) launched directly by this app via subprocess -
+        never through exe.xml, so never a child process of the simulator.
+        """
+        tab = QWidget()
+        tab_layout = QVBoxLayout(tab)
+        tab_layout.setContentsMargins(0, 8, 0, 0)
+        tab_layout.setSpacing(8)
+
+        tab_layout.addWidget(self.create_companion_toolbar())
+
+        self.create_companion_table()
+        tab_layout.addWidget(self.companion_table)
+
+        self.populate_companion_table()
+
+        return tab
+
+    def on_tab_changed(self, index):
+        """Refresh the companion table's live status whenever that tab becomes active."""
+        if self.tab_widget.tabText(index) == "Companion Apps":
+            self.populate_companion_table()
 
     def create_toolbar(self):
         """Compact icon toolbar - replaces the old three rows of full-width buttons."""
@@ -445,6 +507,50 @@ class MainWindow(QMainWindow):
         quit_button = toolbar.widgetForAction(quit_action)
         if quit_button is not None:
             quit_button.setObjectName("quitToolButton")
+
+        return toolbar
+
+    def create_companion_toolbar(self):
+        """Small toolbar for the Companion Apps tab: Add/Modify/Remove + manual Start/Stop."""
+        toolbar = QToolBar("Companion Apps")
+        toolbar.setIconSize(QSize(20, 20))
+        toolbar.setMovable(False)
+        toolbar.setObjectName("mainToolbar")  # reuse the same toolbar styling
+
+        style = self.style()
+
+        self.companion_add_action = QAction(style.standardIcon(QStyle.SP_FileDialogNewFolder), "Add", self)
+        self.companion_add_action.setToolTip("Add a companion app")
+        self.companion_add_action.triggered.connect(self.add_companion_app)
+        toolbar.addAction(self.companion_add_action)
+
+        self.companion_modify_action = QAction(style.standardIcon(QStyle.SP_FileDialogDetailedView), "Modify", self)
+        self.companion_modify_action.setToolTip("Modify the selected companion app")
+        self.companion_modify_action.setEnabled(False)
+        self.companion_modify_action.triggered.connect(self.modify_companion_app)
+        toolbar.addAction(self.companion_modify_action)
+
+        self.companion_remove_action = QAction(style.standardIcon(QStyle.SP_TrashIcon), "Remove", self)
+        self.companion_remove_action.setToolTip("Remove the selected companion app")
+        self.companion_remove_action.setEnabled(False)
+        self.companion_remove_action.triggered.connect(self.remove_companion_app)
+        toolbar.addAction(self.companion_remove_action)
+
+        toolbar.addSeparator()
+
+        # Manual start/stop - always available regardless of the Enabled
+        # column, which only controls automatic start/stop-with-sim.
+        self.companion_start_action = QAction(make_circular_glyph_icon("#2e7d32", "play"), "Start", self)
+        self.companion_start_action.setToolTip("Manually start the selected app")
+        self.companion_start_action.setEnabled(False)
+        self.companion_start_action.triggered.connect(self.start_companion_app)
+        toolbar.addAction(self.companion_start_action)
+
+        self.companion_stop_action = QAction(make_circular_glyph_icon("#c62828", "stop"), "Stop", self)
+        self.companion_stop_action.setToolTip("Manually stop the selected app")
+        self.companion_stop_action.setEnabled(False)
+        self.companion_stop_action.triggered.connect(self.stop_companion_app)
+        toolbar.addAction(self.companion_stop_action)
 
         return toolbar
     
@@ -597,6 +703,45 @@ class MainWindow(QMainWindow):
         # Row height
         self.table.verticalHeader().setDefaultSectionSize(40)
         self.table.verticalHeader().hide()
+
+    def create_companion_table(self):
+        self.companion_table = QTableWidget()
+        self.companion_table.setColumnCount(8)
+        self.companion_table.setHorizontalHeaderLabels(
+            ["Enabled", "Name", "Path", "Arguments", "Start w/ Sim", "Delay", "Stop w/ Sim", "Status"]
+        )
+        self.companion_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.companion_table.setAlternatingRowColors(True)
+        self.companion_table.setShowGrid(False)
+        self.companion_table.itemChanged.connect(self.on_companion_item_changed)
+
+        self.companion_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.companion_table.customContextMenuRequested.connect(self.show_companion_context_menu)
+        self.companion_table.itemSelectionChanged.connect(self.on_companion_selection_changed)
+        self.companion_table.itemDoubleClicked.connect(self.on_companion_table_double_clicked)
+
+        self.companion_table.setObjectName("modernTable")  # reuse the same table styling
+
+        header = self.companion_table.horizontalHeader()
+        header.setDefaultSectionSize(150)
+        header.setSectionResizeMode(0, QHeaderView.Fixed)
+        header.setSectionResizeMode(1, QHeaderView.Interactive)
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.Interactive)
+        header.setSectionResizeMode(4, QHeaderView.Fixed)
+        header.setSectionResizeMode(5, QHeaderView.Fixed)
+        header.setSectionResizeMode(6, QHeaderView.Fixed)
+        header.setSectionResizeMode(7, QHeaderView.Fixed)
+
+        self.companion_table.setColumnWidth(0, 70)    # Enabled
+        self.companion_table.setColumnWidth(1, 180)   # Name
+        self.companion_table.setColumnWidth(4, 100)   # Start w/ Sim
+        self.companion_table.setColumnWidth(5, 70)    # Delay
+        self.companion_table.setColumnWidth(6, 100)   # Stop w/ Sim
+        self.companion_table.setColumnWidth(7, 90)    # Status
+
+        self.companion_table.verticalHeader().setDefaultSectionSize(40)
+        self.companion_table.verticalHeader().hide()
 
     def create_status(self):
         layout = QHBoxLayout()
@@ -1276,6 +1421,213 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Error", str(e))
 
     # -------------------------
+    # Companion Apps Table Handling
+    # -------------------------
+    def populate_companion_table(self):
+        """Mirrors populate_table()'s selection-preservation pattern, for the companion apps table."""
+        selected_id = None
+        selection_model = self.companion_table.selectionModel()
+        if selection_model is not None:
+            selected_rows = selection_model.selectedRows()
+            if selected_rows:
+                old_index = selected_rows[0].row()
+                entries = self.companion_controller.manager.entries
+                if 0 <= old_index < len(entries):
+                    selected_id = entries[old_index].identity_key()
+
+        self.companion_table.blockSignals(True)
+        entries = self.companion_controller.manager.entries
+        self.companion_table.setRowCount(len(entries))
+
+        generic_icon = self.style().standardIcon(QStyle.SP_FileIcon)
+        restore_row = None
+
+        for row, entry in enumerate(entries):
+            enabled_item = QTableWidgetItem()
+            enabled_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+            enabled_item.setCheckState(Qt.Checked if entry.enabled else Qt.Unchecked)
+            enabled_item.setTextAlignment(Qt.AlignCenter)
+            enabled_item.setToolTip("Eligible for automatic start/stop with the simulator")
+            self.companion_table.setItem(row, 0, enabled_item)
+
+            name_item = QTableWidgetItem(entry.name)
+            if entry.path and os.path.exists(entry.path):
+                name_item.setIcon(self.icon_provider.icon(QFileInfo(entry.path)))
+            else:
+                name_item.setIcon(generic_icon)
+                name_item.setToolTip("Executable not found at the configured path")
+            name_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            self.companion_table.setItem(row, 1, name_item)
+
+            path_item = QTableWidgetItem(entry.path)
+            path_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            path_item.setToolTip(entry.path)
+            self.companion_table.setItem(row, 2, path_item)
+
+            args_item = QTableWidgetItem(entry.args)
+            args_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            self.companion_table.setItem(row, 3, args_item)
+
+            start_item = QTableWidgetItem()
+            start_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+            start_item.setCheckState(Qt.Checked if entry.start_with_sim else Qt.Unchecked)
+            start_item.setTextAlignment(Qt.AlignCenter)
+            start_item.setToolTip("Automatically start this app when the simulator starts")
+            self.companion_table.setItem(row, 4, start_item)
+
+            delay_item = QTableWidgetItem(f"{entry.start_delay_seconds}s" if entry.start_delay_seconds else "-")
+            delay_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            delay_item.setTextAlignment(Qt.AlignCenter)
+            delay_item.setToolTip("Seconds to wait after the simulator starts before auto-launching (edit via Modify)")
+            self.companion_table.setItem(row, 5, delay_item)
+
+            stop_item = QTableWidgetItem()
+            stop_item.setFlags(Qt.ItemIsUserCheckable | Qt.ItemIsEnabled)
+            stop_item.setCheckState(Qt.Checked if entry.stop_with_sim else Qt.Unchecked)
+            stop_item.setTextAlignment(Qt.AlignCenter)
+            stop_item.setToolTip("Automatically stop this app when the simulator stops")
+            self.companion_table.setItem(row, 6, stop_item)
+
+            is_running = self.companion_controller.is_running(entry)
+            status_item = QTableWidgetItem("Running" if is_running else "Stopped")
+            status_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            status_item.setTextAlignment(Qt.AlignCenter)
+            self.companion_table.setItem(row, 7, status_item)
+
+            if selected_id is not None and entry.identity_key() == selected_id:
+                restore_row = row
+
+        self.companion_table.blockSignals(False)
+
+        if restore_row is not None:
+            self.companion_table.selectRow(restore_row)
+            self.companion_table.scrollToItem(self.companion_table.item(restore_row, 0))
+
+        self.on_companion_selection_changed()
+
+    def on_companion_selection_changed(self):
+        has_selection = bool(self.companion_table.selectionModel().selectedRows())
+        self.companion_modify_action.setEnabled(has_selection)
+        self.companion_remove_action.setEnabled(has_selection)
+        self.companion_start_action.setEnabled(has_selection)
+        self.companion_stop_action.setEnabled(has_selection)
+
+    def on_companion_table_double_clicked(self, item):
+        if item.column() in (0, 4, 6):  # checkboxes handle their own toggling
+            return
+        self.modify_companion_app()
+
+    def show_companion_context_menu(self, pos):
+        if not self.companion_table.selectionModel().selectedRows():
+            return
+        menu = QMenu(self)
+        menu.addAction("Start", self.start_companion_app)
+        menu.addAction("Stop", self.stop_companion_app)
+        menu.addSeparator()
+        menu.addAction("Modify", self.modify_companion_app)
+        menu.addSeparator()
+        menu.addAction("Remove", self.remove_companion_app)
+        menu.exec(self.companion_table.viewport().mapToGlobal(pos))
+
+    def on_companion_item_changed(self, item):
+        """Handle in-table checkbox toggles: Enabled, Start w/ Sim, Stop w/ Sim."""
+        row = item.row()
+        entries = self.companion_controller.manager.entries
+        if row < 0 or row >= len(entries):
+            return
+        entry = entries[row]
+
+        if item.column() == 0:
+            entry.enabled = item.checkState() == Qt.Checked
+        elif item.column() == 4:
+            entry.start_with_sim = item.checkState() == Qt.Checked
+        elif item.column() == 6:
+            entry.stop_with_sim = item.checkState() == Qt.Checked
+        else:
+            return
+
+        try:
+            self.companion_controller.manager.save()
+            self.update_status("Companion app settings saved")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", str(e))
+
+    def on_companion_process_event(self, addon_name, pid):
+        """Refresh the companion table's live Status column - filters out exe.xml addon events."""
+        if addon_name.startswith("companion:"):
+            self.populate_companion_table()
+
+    def on_companion_launch_failed(self, name, error_message):
+        QMessageBox.critical(self, "Launch Failed", f"Could not launch {name}:\n\n{error_message}")
+
+    def add_companion_app(self):
+        dlg = CompanionAppDialog(self, "Add Companion App")
+        if dlg.exec():
+            name, path, args, enabled, start_with_sim, stop_with_sim, start_delay_seconds = dlg.get_data()
+            self.companion_controller.add_entry(name, path, args, enabled, start_with_sim, stop_with_sim, start_delay_seconds)
+            self.update_status(f"Added companion app: {name}")
+
+    def modify_companion_app(self):
+        rows = self.companion_table.selectionModel().selectedRows()
+        if not rows:
+            QMessageBox.information(self, "No Selection", "Please select an app to modify.")
+            return
+        index = rows[0].row()
+        entries = self.companion_controller.manager.entries
+        if index >= len(entries):
+            return
+        entry = entries[index]
+
+        dlg = CompanionAppDialog(self, "Modify Companion App")
+        dlg.name_edit.setText(entry.name)
+        dlg.path_edit.setText(entry.path)
+        dlg.args_edit.setText(entry.args)
+        dlg.enabled_check.setChecked(entry.enabled)
+        dlg.start_with_sim_check.setChecked(entry.start_with_sim)
+        dlg.stop_with_sim_check.setChecked(entry.stop_with_sim)
+        dlg.start_delay_spin.setValue(entry.start_delay_seconds)
+
+        if dlg.exec():
+            name, path, args, enabled, start_with_sim, stop_with_sim, start_delay_seconds = dlg.get_data()
+            self.companion_controller.modify_entry(index, name, path, args, enabled, start_with_sim, stop_with_sim, start_delay_seconds)
+            self.update_status(f"Modified companion app: {name}")
+
+    def remove_companion_app(self):
+        rows = self.companion_table.selectionModel().selectedRows()
+        if not rows:
+            QMessageBox.information(self, "No Selection", "Please select an app to remove.")
+            return
+        index = rows[0].row()
+        entries = self.companion_controller.manager.entries
+        if index >= len(entries):
+            return
+        name = entries[index].name
+
+        reply = QMessageBox.question(
+            self, "Confirm Removal",
+            f"Are you sure you want to remove '{name}'?\n\n"
+            f"This only removes it from this list - it won't uninstall or delete the app itself.",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            self.companion_controller.remove_entry(index)
+            self.update_status(f"Removed companion app: {name}")
+
+    def start_companion_app(self):
+        rows = self.companion_table.selectionModel().selectedRows()
+        if not rows:
+            QMessageBox.information(self, "No Selection", "Please select an app to start.")
+            return
+        self.companion_controller.start_entry(rows[0].row())
+
+    def stop_companion_app(self):
+        rows = self.companion_table.selectionModel().selectedRows()
+        if not rows:
+            QMessageBox.information(self, "No Selection", "Please select an app to stop.")
+            return
+        self.companion_controller.stop_entry(rows[0].row())
+
+    # -------------------------
     # Entry Handling
     # -------------------------
     def add_entry(self):
@@ -1550,8 +1902,14 @@ class MainWindow(QMainWindow):
                 except Exception as e:
                     logger.error(f"Error terminating {addon_name}: {e}")
         
-        # Also try to terminate any other running addon processes
-        additional_terminated = self.process_monitor.terminate_all_addon_processes()
+        # Also try to terminate any other running addon processes.
+        # Companion apps are explicitly excluded - they have their own
+        # separate Stop w/ Sim opt-in (handled by
+        # companion_controller.on_sim_stopped, connected to this same
+        # sim_stopped signal), and must never be swept up here just
+        # because they happen to share this process tracker for live
+        # status purposes.
+        additional_terminated = self.process_monitor.terminate_all_addon_processes(exclude_prefixes=("companion:",))
         if additional_terminated > total_terminated:
             logger.info(f"Terminated {additional_terminated - total_terminated} additional processes")
             total_terminated = additional_terminated
@@ -2012,6 +2370,36 @@ class MainWindow(QMainWindow):
 
         QToolBar#mainToolbar QToolButton#quitToolButton:pressed {
             background-color: #f8c9c2;
+        }
+
+        QTabWidget#mainTabs::pane {
+            border: 1px solid #d5d8dc;
+            background-color: #ffffff;
+            border-radius: 4px;
+            top: -1px;
+        }
+
+        QTabWidget#mainTabs QTabBar::tab {
+            background-color: #eef0f3;
+            color: #5f6368;
+            border: 1px solid #d5d8dc;
+            border-bottom: none;
+            border-top-left-radius: 4px;
+            border-top-right-radius: 4px;
+            padding: 8px 18px;
+            margin-right: 2px;
+            font-size: 13px;
+            font-weight: 500;
+        }
+
+        QTabWidget#mainTabs QTabBar::tab:selected {
+            background-color: #ffffff;
+            color: #1e88e5;
+        }
+
+        QTabWidget#mainTabs QTabBar::tab:hover:!selected {
+            background-color: #dde5f0;
+            color: #202124;
         }
         
         QLabel#mainTitle {
